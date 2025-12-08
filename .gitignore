@@ -1,0 +1,93 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Go module files that can be regenerated
+go.sum
+
+# Dependency directories
+# vendor/
+
+# IDE and editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Profiling data
+*.prof
+*.trace
+
+# Build artifacts
+bin/
+dist/
+pkg/
+out/
+
+# Temporary files
+tmp/
+temp/
+
+# Log files
+*.log
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Compiled Object files, Static and Dynamic libs (Objective-C)
+*.o
+*.a
+*.lib
+
+# Coverage files
+coverage.html
+coverage.txt
+
+# Benchmark output
+bench*.txt
+bench*.out
+
+# Local development configuration
+config.local.*
+settings.local.*
+
+# Binary output from examples
+examples/*.exe
+examples/*.out
+
+# Go specific
+*.test
+*.out
+coverage.out
+*.prof
+*.trace
+
+# Vendor directory (if using vendoring)
+vendor/
