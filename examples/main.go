@@ -86,16 +86,28 @@ func main() {
 	)
 
 	// Register the Anthropic adapter as a POST endpoint
-	// Blaze now ships with AI-native web tools:
+	// Blaze ships with a comprehensive AI toolkit:
+	//
+	// Web Tools:
 	// - web_search: Search the web (DuckDuckGo, no API key)
 	// - web_read: Read webpages as clean Markdown
 	// - web_fetch: Raw HTTP fetch for APIs
+	//
+	// Essential Tools:
+	// - datetime: Current time, timezone conversion, date math
+	// - json_query: Query/filter JSON data (jq-like)
+	// - memory: In-memory key-value storage with TTL
 	engine.POST("/chat", adapter.AnthropicAdapter(
 		calculatorTool,
 		weatherTool,
-		tool.NewWebSearchTool(), // Search the internet
-		tool.NewWebReadTool(),   // Read webpages as Markdown
-		tool.NewWebFetchTool(),  // Raw HTTP fetch
+		// Web Tools
+		tool.NewWebSearchTool(),
+		tool.NewWebReadTool(),
+		tool.NewWebFetchTool(),
+		// Essential Tools
+		tool.NewDateTimeTool(),
+		tool.NewJSONQueryTool(),
+		tool.NewMemoryTool(),
 	))
 
 	// Also add a simple health check endpoint
