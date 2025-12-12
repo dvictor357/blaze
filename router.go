@@ -40,6 +40,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	for _, route := range r.paramRoutes {
+		if req.Method != route.method {
+			continue
+		}
 		if params := match(route.path, req.URL.Path); params != nil {
 			ctx := &Context{ResponseWriter: w, Request: req, params: params}
 			if err := route.handler(ctx); err != nil {
