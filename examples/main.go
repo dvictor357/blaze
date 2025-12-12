@@ -6,6 +6,7 @@ import (
 
 	"github.com/dvictor357/blaze"
 	"github.com/dvictor357/blaze/adapter"
+	"github.com/dvictor357/blaze/tool"
 )
 
 func main() {
@@ -85,7 +86,17 @@ func main() {
 	)
 
 	// Register the Anthropic adapter as a POST endpoint
-	engine.POST("/chat", adapter.AnthropicAdapter(calculatorTool, weatherTool))
+	// Blaze now ships with AI-native web tools:
+	// - web_search: Search the web (DuckDuckGo, no API key)
+	// - web_read: Read webpages as clean Markdown
+	// - web_fetch: Raw HTTP fetch for APIs
+	engine.POST("/chat", adapter.AnthropicAdapter(
+		calculatorTool,
+		weatherTool,
+		tool.NewWebSearchTool(), // Search the internet
+		tool.NewWebReadTool(),   // Read webpages as Markdown
+		tool.NewWebFetchTool(),  // Raw HTTP fetch
+	))
 
 	// Also add a simple health check endpoint
 	engine.GET("/", func(c *blaze.Context) error {
