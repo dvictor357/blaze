@@ -12,6 +12,7 @@ Most web frameworks just handle HTTP. **Blaze goes further** — it ships with a
 | Feature | Blaze | Gin | Echo | Fiber |
 |---------|:-----:|:---:|:----:|:-----:|
 | Fast HTTP routing | ✅ | ✅ | ✅ | ✅ |
+| **Radix tree router** | ✅ | ✅ | ✅ | ❌ |
 | Middleware support | ✅ | ✅ | ✅ | ✅ |
 | JSON streaming | ✅ | ❌ | ❌ | ❌ |
 | **AI Tool Adapter** | ✅ | ❌ | ❌ | ❌ |
@@ -19,6 +20,16 @@ Most web frameworks just handle HTTP. **Blaze goes further** — it ships with a
 | **HTML→Markdown** | ✅ | ❌ | ❌ | ❌ |
 | **Memory/State** | ✅ | ❌ | ❌ | ❌ |
 | Zero dependencies | ✅ | ❌ | ❌ | ❌ |
+
+### Performance
+
+```
+BenchmarkRouter_Static-14     8,653,634    126.6 ns/op    96 B/op    2 allocs/op
+BenchmarkRouter_Param-14     10,620,004    109.2 ns/op   400 B/op    3 allocs/op
+BenchmarkRouter_Mixed-14      3,767,991    311.8 ns/op   848 B/op    8 allocs/op
+```
+
+> Tested on Apple M4 Pro with 100 routes
 
 ## Quick Start
 
@@ -51,9 +62,18 @@ e := blaze.New()
 
 e.GET("/users", listUsers)
 e.POST("/users", createUser)
-e.GET("/users/:id", getUser)      // Path parameters
+e.GET("/users/:id", getUser)           // Path parameters
 e.PUT("/users/:id", updateUser)
 e.DELETE("/users/:id", deleteUser)
+e.GET("/files/*filepath", serveFile)   // Wildcard
+
+// Route groups
+api := e.Group("/api")
+api.Use(authMiddleware)  // Group-specific middleware
+api.GET("/users", listUsersAPI)
+
+v1 := api.Group("/v1")   // Nested: /api/v1/...
+v1.GET("/status", getStatus)
 ```
 
 ### Middleware
@@ -92,7 +112,7 @@ func handler(c *blaze.Context) error {
     c.BindJSON(&req)
     
     // Streaming JSON (for AI tools)
-    return c.StreamJSONStream(dataChan)
+    return c.StreamJSON(dataChan)
 }
 ```
 

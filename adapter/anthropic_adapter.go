@@ -93,12 +93,12 @@ func AnthropicAdapter(tools ...Tool) blaze.HandlerFunc {
 		}
 
 		// Send streaming response
-		return ctx.StreamJSONStream(streamResponse(responses))
+		return ctx.StreamJSON(streamResponse(responses))
 	}
 }
 
-func streamResponse(blocks []ContentBlock) <-chan map[string]any {
-	ch := make(chan map[string]any)
+func streamResponse(blocks []ContentBlock) <-chan any {
+	ch := make(chan any)
 	go func() {
 		defer close(ch)
 		ch <- map[string]any{

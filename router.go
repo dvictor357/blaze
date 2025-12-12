@@ -5,67 +5,160 @@ import (
 	"strings"
 )
 
-type route struct {
-	method  string
-	path    string
-	handler HandlerFunc
+// node represents a node in the radix tree
+type node struct {
+	path     string      // path segment (compressed)
+	handler  HandlerFunc // handler if this node is an endpoint
+	children []*node     // child nodes (sorted by first char for binary search potential)
+	param    string      // parameter name if this is a :param node
+	wildcard bool        // true if this is a *wildcard node
 }
 
+// Router is a high-performance radix tree based router
 type Router struct {
-	routes      []route
-	paramRoutes []route
+	trees map[string]*node // per-method trees for O(1) method lookup
 }
 
 func newRouter() *Router {
-	return &Router{}
+	return &Router{
+		trees: make(map[string]*node),
+	}
 }
 
+// handle registers a new route
 func (r *Router) handle(method, path string, handler HandlerFunc) {
-	if strings.Contains(path, ":") {
-		r.paramRoutes = append(r.paramRoutes, route{method, path, handler})
-	} else {
-		r.routes = append(r.routes, route{method, path, handler})
+	if r.trees[method] == nil {
+		r.trees[method] = &node{}
 	}
+	r.insert(r.trees[method], path, handler)
 }
 
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	for _, route := range r.routes {
-		if req.Method == route.method && req.URL.Path == route.path {
-			ctx := &Context{ResponseWriter: w, Request: req, params: map[string]string{}}
-			if err := route.handler(ctx); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-			return
-		}
+// insert adds a path to the radix tree
+func (r *Router) insert(root *node, path string, handler HandlerFunc) {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" {
+		root.handler = handler
+		return
 	}
 
-	for _, route := range r.paramRoutes {
-		if params := match(route.path, req.URL.Path); params != nil {
-			ctx := &Context{ResponseWriter: w, Request: req, params: params}
-			if err := route.handler(ctx); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-			return
-		}
-	}
+	segments := splitPath(path)
+	current := root
 
-	http.NotFound(w, req)
+	for _, seg := range segments {
+		child := r.findChild(current, seg)
+		if child == nil {
+			child = &node{}
+			if strings.HasPrefix(seg, ":") {
+				child.param = seg[1:]
+				child.path = ":"
+			} else if strings.HasPrefix(seg, "*") {
+				child.wildcard = true
+				child.path = "*"
+				child.param = seg[1:]
+			} else {
+				child.path = seg
+			}
+			current.children = append(current.children, child)
+		}
+		current = child
+	}
+	current.handler = handler
 }
 
-func match(pattern, path string) map[string]string {
-	pp := strings.Split(strings.Trim(pattern, "/"), "/")
-	pa := strings.Split(strings.Trim(path, "/"), "/")
-	if len(pp) != len(pa) {
+// findChild finds a matching child node
+func (r *Router) findChild(n *node, seg string) *node {
+	for _, child := range n.children {
+		if child.path == seg {
+			return child
+		}
+		// Match param nodes
+		if child.path == ":" && strings.HasPrefix(seg, ":") {
+			return child
+		}
+	}
+	return nil
+}
+
+// lookup finds a handler and extracts params
+func (r *Router) lookup(method, path string) (HandlerFunc, map[string]string) {
+	root := r.trees[method]
+	if root == nil {
+		return nil, nil
+	}
+
+	path = strings.TrimPrefix(path, "/")
+	if path == "" {
+		return root.handler, map[string]string{}
+	}
+
+	segments := splitPath(path)
+	params := make(map[string]string)
+	current := root
+
+	for i, seg := range segments {
+		child := r.matchChild(current, seg, params)
+		if child == nil {
+			return nil, nil
+		}
+		// Wildcard captures rest of path
+		if child.wildcard {
+			params[child.param] = strings.Join(segments[i:], "/")
+			return child.handler, params
+		}
+		current = child
+	}
+
+	return current.handler, params
+}
+
+// matchChild finds a child that matches the segment
+func (r *Router) matchChild(n *node, seg string, params map[string]string) *node {
+	// First try exact match (fastest)
+	for _, child := range n.children {
+		if child.path == seg {
+			return child
+		}
+	}
+	// Then try param match
+	for _, child := range n.children {
+		if child.path == ":" {
+			params[child.param] = seg
+			return child
+		}
+	}
+	// Finally try wildcard
+	for _, child := range n.children {
+		if child.wildcard {
+			return child
+		}
+	}
+	return nil
+}
+
+// splitPath splits path into segments
+func splitPath(path string) []string {
+	path = strings.Trim(path, "/")
+	if path == "" {
 		return nil
 	}
+	return strings.Split(path, "/")
+}
 
-	params := make(map[string]string)
-	for i, part := range pp {
-		if after, ok := strings.CutPrefix(part, ":"); ok {
-			params[after] = pa[i]
-		} else if part != pa[i] {
-			return nil
-		}
+// ServeHTTP implements http.Handler
+func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	handler, params := r.lookup(req.Method, req.URL.Path)
+	if handler == nil {
+		http.NotFound(w, req)
+		return
 	}
-	return params
+
+	ctx := &Context{
+		ResponseWriter: w,
+		Request:        req,
+		params:         params,
+	}
+
+	if err := handler(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
