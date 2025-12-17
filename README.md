@@ -126,13 +126,19 @@ Blaze's killer feature: **turn any Go function into a Claude-callable tool**.
 
 ```
 ┌─────────────────────────────────────┐
-│         Claude / Gemini / AI        │
+│       Claude / GPT / Gemini / AI    │
 └──────────────┬──────────────────────┘
-               │ HTTP POST /chat
+               │ HTTP POST
+        ┌──────┴──────┐
+        ▼             ▼
+  POST /chat    POST /openai
+  (Anthropic)     (OpenAI)
+        │             │
+        └──────┬──────┘
                ▼
 ┌─────────────────────────────────────┐
 │         Blaze Framework             │
-│         AnthropicAdapter            │
+│    Shared Tool Registry & Handlers  │
 └──────────────┬──────────────────────┘
                │
         ┌──────┴──────┐
@@ -337,21 +343,32 @@ Persist data across tool calls. Thread-safe with TTL support.
 
 ```
 blaze/
-├── blaze.go         # Engine & HTTP methods
-├── router.go        # URL routing with params
-├── context.go       # Request/Response context
-├── middleware.go    # Logger, Recovery
+├── blaze.go           # Engine & HTTP methods
+├── router.go          # URL routing with params
+├── context.go         # Request/Response context
+├── middleware.go      # Logger, Recovery
+├── docs/              # Documentation
+│   ├── README.md      # Docs index
+│   ├── adapters/      # Adapter guides
+│   │   ├── anthropic.md
+│   │   └── openai.md
+│   └── tools/         # Tool documentation
+│       ├── web.md
+│       ├── datetime.md
+│       ├── json-query.md
+│       └── memory.md
 ├── adapter/
-│   └── anthropic_adapter.go  # Claude-compatible adapter
+│   ├── anthropic_adapter.go
+│   └── openai_adapter.go
 ├── tool/
-│   ├── web_search.go    # DuckDuckGo search
-│   ├── web_read.go      # HTML→Markdown reader
-│   ├── web_fetcher.go   # Raw HTTP fetch
-│   ├── datetime.go      # Time operations
-│   ├── json_query.go    # JSON querying
-│   └── memory.go        # Key-value store
+│   ├── web_search.go
+│   ├── web_read.go
+│   ├── web_fetcher.go
+│   ├── datetime.go
+│   ├── json_query.go
+│   └── memory.go
 └── examples/
-    └── main.go          # Full example
+    └── main.go
 ```
 
 ---
@@ -383,17 +400,22 @@ func main() {
         })
     })
 
-    // AI endpoint with all tools
-    e.POST("/chat", adapter.AnthropicAdapter(
-        // Web Tools
+    // Collect all tools
+    tools := []adapter.Tool{
         tool.NewWebSearchTool(),
         tool.NewWebReadTool(),
         tool.NewWebFetchTool(),
-        // Essential Tools
         tool.NewDateTimeTool(),
         tool.NewJSONQueryTool(),
         tool.NewMemoryTool(),
-    ))
+    }
+
+    // AI endpoints - supports both Anthropic and OpenAI formats
+    e.POST("/chat", adapter.AnthropicAdapter(tools...))
+    e.POST("/openai", adapter.OpenAIAdapter(tools...))
+    
+    // Tool discovery endpoint
+    e.GET("/tools", adapter.ListToolsHandler(tools...))
 
     fmt.Println("🔥 Blaze running on :8080")
     e.Listen(":8080")
@@ -441,14 +463,55 @@ myTool := adapter.NewTool(
 )
 ```
 
-### Add New Adapters
+### OpenAI Adapter
 
-Create adapters for other AI providers:
+Blaze includes an OpenAI-compatible adapter:
 
 ```go
-// adapter/openai_adapter.go
-func OpenAIAdapter(tools ...Tool) blaze.HandlerFunc {
-    // Implement OpenAI's tool calling format
+// Use the same tools with OpenAI format
+e.POST("/openai", adapter.OpenAIAdapter(
+    tool.NewWebSearchTool(),
+    tool.NewDateTimeTool(),
+))
+```
+
+**Test with curl:**
+```bash
+curl -X POST http://localhost:8080/openai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "Search for golang"},
+      {
+        "role": "assistant",
+        "tool_calls": [{
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "web_search",
+            "arguments": "{\"query\": \"golang best practices\"}"
+          }
+        }]
+      }
+    ]
+  }'
+```
+
+### Tool Discovery
+
+List available tools in both formats:
+
+```go
+e.GET("/tools", adapter.ListToolsHandler(tools...))
+```
+
+**Response:**
+```json
+{
+  "openai": [{"type": "function", "function": {...}}],
+  "anthropic": [{"name": "...", "input_schema": {...}}],
+  "count": 6
 }
 ```
 
@@ -456,7 +519,7 @@ func OpenAIAdapter(tools ...Tool) blaze.HandlerFunc {
 
 ## Roadmap
 
-- [ ] OpenAI adapter
+- [x] OpenAI adapter
 - [ ] Gemini adapter
 - [ ] File system tools (sandboxed)
 - [ ] Shell execution (sandboxed)

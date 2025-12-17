@@ -85,6 +85,20 @@ func main() {
 		},
 	)
 
+	// Collect all tools for reuse
+	allTools := []adapter.Tool{
+		calculatorTool,
+		weatherTool,
+		// Web Tools
+		tool.NewWebSearchTool(),
+		tool.NewWebReadTool(),
+		tool.NewWebFetchTool(),
+		// Essential Tools
+		tool.NewDateTimeTool(),
+		tool.NewJSONQueryTool(),
+		tool.NewMemoryTool(),
+	}
+
 	// Register the Anthropic adapter as a POST endpoint
 	// Blaze ships with a comprehensive AI toolkit:
 	//
@@ -97,28 +111,28 @@ func main() {
 	// - datetime: Current time, timezone conversion, date math
 	// - json_query: Query/filter JSON data (jq-like)
 	// - memory: In-memory key-value storage with TTL
-	engine.POST("/chat", adapter.AnthropicAdapter(
-		calculatorTool,
-		weatherTool,
-		// Web Tools
-		tool.NewWebSearchTool(),
-		tool.NewWebReadTool(),
-		tool.NewWebFetchTool(),
-		// Essential Tools
-		tool.NewDateTimeTool(),
-		tool.NewJSONQueryTool(),
-		tool.NewMemoryTool(),
-	))
+	engine.POST("/chat", adapter.AnthropicAdapter(allTools...))
+
+	// Register the OpenAI adapter for OpenAI-compatible clients
+	engine.POST("/openai", adapter.OpenAIAdapter(allTools...))
+
+	// Register ListTools endpoint for tool discovery
+	// Returns tools in both OpenAI and Anthropic formats
+	engine.GET("/tools", adapter.ListToolsHandler(allTools...))
 
 	// Also add a simple health check endpoint
 	engine.GET("/", func(c *blaze.Context) error {
 		return c.JSON(200, map[string]string{
-			"status":  "ok",
-			"message": "Claude Tool Server is running",
+			"status":    "ok",
+			"message":   "AI Tool Server is running",
+			"endpoints": "/chat (Anthropic), /openai (OpenAI), /tools (List)",
 		})
 	})
 
-	fmt.Println("Starting server on :8080")
-	fmt.Println("Try POSTing to /chat with Claude's tool_use format")
+	fmt.Println("🔥 Blaze AI Tool Server running on :8080")
+	fmt.Println("Endpoints:")
+	fmt.Println("  POST /chat   - Anthropic/Claude format")
+	fmt.Println("  POST /openai - OpenAI format")
+	fmt.Println("  GET  /tools  - List available tools")
 	engine.Listen(":8080")
 }
