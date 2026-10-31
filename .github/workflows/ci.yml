@@ -18,15 +18,20 @@ env:
 
 jobs:
   go:
-    name: Go ${{ matrix.go }}
+    name: Go ${{ matrix.go }} (${{ matrix.module }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         go: ['1.25.5', 'stable']
+        # The core module, the MCP module, and the MCP example module.
+        module: ['.', 'mcp', 'examples/mcp-server']
     env:
       CGO_ENABLED: '1'
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -40,6 +45,18 @@ jobs:
           if [[ -n "$unformatted" ]]; then
             echo 'The following files need gofmt:'
             echo "$unformatted"
+            exit 1
+          fi
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+      - name: Core module has no external dependencies
+        if: matrix.module == '.'
+        shell: bash
+        run: |
+          deps=$(go list -m all | tail -n +2)
+          if [[ -n "$deps" ]]; then
+            echo "The core module must stay dependency-free, found:"
+            echo "$deps"
             exit 1
           fi
       - name: Build
