@@ -34,8 +34,8 @@ import (
 )
 
 const (
-	defaultOpenAIModel    = "gpt-5-mini"
-	defaultAnthropicModel = "claude-opus-5-5"
+	defaultOpenAIModel    = "gpt-5.6-terra"
+	defaultAnthropicModel = "claude-sonnet-5-5"
 	maxTurns              = 8
 	maxErrorBody          = 2 << 10
 )
