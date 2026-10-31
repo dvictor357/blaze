@@ -1,0 +1,54 @@
+name: Live provider proof
+
+# Manual only: this workflow makes two billed requests to each provider.
+on:
+  workflow_dispatch:
+    inputs:
+      openai_model:
+        description: OpenAI model ID available to the configured API key
+        required: true
+        type: string
+      anthropic_model:
+        description: Anthropic model ID available to the configured API key
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-provider-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  roundtrips:
+    name: Real OpenAI and Anthropic tool round trips
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: integration/providers
+    env:
+      GOTOOLCHAIN: local
+      BLAZE_LIVE_PROVIDERS: '1'
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_MODEL: ${{ inputs.openai_model }}
+      ANTHROPIC_MODEL: ${{ inputs.anthropic_model }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - name: Require credentials before making any paid requests
+        shell: bash
+        run: |
+          if [[ -z "$OPENAI_API_KEY" || -z "$ANTHROPIC_API_KEY" ]]; then
+            echo 'Configure both OPENAI_API_KEY and ANTHROPIC_API_KEY repository secrets before running live proof.'
+            exit 1
+          fi
+      - name: Execute real two-turn provider round trips
+        run: go test -v -count=1 -run '^TestLive(OpenAI|Anthropic)$' -timeout 5m ./...

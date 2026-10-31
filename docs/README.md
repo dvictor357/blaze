@@ -15,6 +15,9 @@ Blaze is a Go HTTP toolkit and tool-execution runtime. Your application owns mod
 
 Both guides describe pure conversions, not HTTP model endpoints or model-stream protocols. Provider clients and external API calls remain application-owned.
 
+The separate [official-SDK integration module](../integration/providers) contains opt-in live round-trip tests; the provider guides explain the required API keys/models. Ordinary [CI](../.github/workflows/ci.yml) compiles these tests without paid calls. The manual [live-proof workflow](../.github/workflows/providers.yml) is the release gate; a compile or skip is not live proof.
+
+
 ## Built-in tools
 
 | Guide | Scope |
