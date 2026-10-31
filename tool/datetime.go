@@ -53,7 +53,8 @@ func NewDateTimeTool() adapter.Tool {
 					"description": "Duration to add (e.g., '1h', '24h', '7d', '30d', '-2h')",
 				},
 			},
-			"required": []string{"action"},
+			"required":             []string{"action"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {

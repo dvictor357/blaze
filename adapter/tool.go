@@ -19,9 +19,11 @@ import (
 // stop a running function, so a handler that ignores the context keeps
 // running to completion and delays the batch.
 //
-// input is always a valid JSON object. Blaze does NOT validate it against the
-// tool's InputSchema: the schema is metadata sent to the model, and the
-// handler must validate its own domain inputs.
+// input is always a valid JSON object. Unless Config.DisableSchemaValidation
+// is set, it has also been validated against the tool's InputSchema (see
+// schema.go for the supported keywords), so the handler only runs on
+// conforming arguments. Handlers should still check domain rules and
+// authorization that a schema cannot express.
 type Handler func(ctx context.Context, input json.RawMessage) (any, error)
 
 // Tool is a callable function exposed to an application's model loop.
@@ -29,7 +31,8 @@ type Tool struct {
 	Name        string
 	Description string
 	// InputSchema is a JSON Schema object advertised to providers. It must be
-	// a JSON object with "type": "object". It is not enforced at runtime.
+	// a JSON object with "type": "object". Call arguments are validated
+	// against it before the handler runs (see Config.DisableSchemaValidation).
 	InputSchema any
 	Handler     Handler
 }
@@ -74,6 +77,11 @@ type Config struct {
 	// MaxDuration bounds the whole batch (default 60s). Calls not started
 	// when it elapses are reported as timed out without being executed.
 	MaxDuration time.Duration
+	// DisableSchemaValidation turns off runtime validation of call arguments
+	// against each tool's InputSchema, and accepts schemas that use keywords
+	// the validator does not implement (such as $ref). Handlers then receive
+	// any JSON object and must validate it themselves.
+	DisableSchemaValidation bool
 }
 
 func (c Config) normalize() (Config, error) {
@@ -116,14 +124,18 @@ type Call struct {
 
 // Error codes reported in Result.Error.
 const (
-	CodeHandler        = "handler_error"
-	CodeTimeout        = "timeout"
-	CodeCanceled       = "canceled"
-	CodeResultTooLarge = "result_too_large"
-	CodeResultEncoding = "result_encoding"
-	CodeOutputBudget   = "output_budget_exceeded"
-	CodeSkipped        = "skipped"
-	CodePanic          = "panic"
+	CodeHandler = "handler_error"
+	// CodeInvalidArguments means the input did not match the tool's
+	// InputSchema; the handler was not called. The message lists the
+	// violations so a model can correct its call.
+	CodeInvalidArguments = "invalid_arguments"
+	CodeTimeout          = "timeout"
+	CodeCanceled         = "canceled"
+	CodeResultTooLarge   = "result_too_large"
+	CodeResultEncoding   = "result_encoding"
+	CodeOutputBudget     = "output_budget_exceeded"
+	CodeSkipped          = "skipped"
+	CodePanic            = "panic"
 )
 
 // Error codes reported by batch validation (BatchError.Code).
@@ -181,15 +193,18 @@ var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 // repeats its side effects. Applications that need exactly-once behavior must
 // make tools idempotent, for example with their own idempotency keys.
 type Executor struct {
-	cfg    Config
-	tools  []Tool
-	byName map[string]Tool
+	cfg     Config
+	tools   []Tool
+	byName  map[string]Tool
+	schemas map[string]*schemaNode // nil when schema validation is disabled
 }
 
 // NewExecutor validates the configuration and tools and returns an Executor.
 // It rejects: no tools, invalid or duplicate names, nil handlers, and input
 // schemas that are not JSON objects with "type": "object" (a nil schema
-// becomes an empty object schema). Tools are copied; later changes to the
+// becomes an empty object schema). Unless Config.DisableSchemaValidation is
+// set, each schema is also compiled for runtime validation, and schemas with
+// invalid or unsupported keywords are rejected. Tools are copied; later changes to the
 // slice or the Tool values do not affect the Executor.
 func NewExecutor(cfg Config, tools ...Tool) (*Executor, error) {
 	cfg, err := cfg.normalize()
@@ -201,6 +216,9 @@ func NewExecutor(cfg Config, tools ...Tool) (*Executor, error) {
 	}
 
 	e := &Executor{cfg: cfg, byName: make(map[string]Tool, len(tools))}
+	if !cfg.DisableSchemaValidation {
+		e.schemas = make(map[string]*schemaNode, len(tools))
+	}
 	for i, t := range tools {
 		if !toolNamePattern.MatchString(t.Name) {
 			return nil, fmt.Errorf("adapter: tool #%d: invalid name %q (want 1-64 of letters, digits, '_' or '-')", i, t.Name)
@@ -214,6 +232,13 @@ func NewExecutor(cfg Config, tools ...Tool) (*Executor, error) {
 		schema, err := normalizeSchema(t.InputSchema)
 		if err != nil {
 			return nil, fmt.Errorf("adapter: tool %q: %w", t.Name, err)
+		}
+		if e.schemas != nil {
+			compiled, err := compileSchema(schema, "")
+			if err != nil {
+				return nil, fmt.Errorf("adapter: tool %q: input %w", t.Name, err)
+			}
+			e.schemas[t.Name] = compiled
 		}
 		t.InputSchema = schema
 		e.tools = append(e.tools, t)
@@ -393,6 +418,11 @@ func (e *Executor) invoke(ctx context.Context, call Call) (res Result) {
 
 	if err := callCtx.Err(); err != nil {
 		return contextFailure(call, err)
+	}
+	if schema := e.schemas[call.Name]; schema != nil {
+		if err := schema.validateInput(input); err != nil {
+			return failure(call, CodeInvalidArguments, err.Error())
+		}
 	}
 	out, err := tool.Handler(callCtx, input)
 	if ctxErr := callCtx.Err(); ctxErr != nil {

@@ -27,7 +27,7 @@ The separate [official-SDK integration module](../integration/providers) contain
 | [Datetime](tools/datetime.md) | Date/time actions and supported formats |
 | [JSON query](tools/json-query.md) | Path/filter syntax and transformation actions |
 
-Handlers receive a cancellation context and JSON object. Schema metadata informs the model; it is not generic runtime schema validation. Authenticate and authorize callers before dispatch and never derive memory scope from untrusted request JSON.
+Handlers receive a cancellation context and JSON object. Arguments are validated against each tool's input schema before its handler runs. Authenticate and authorize callers before dispatch and never derive memory scope from untrusted request JSON.
 
 ## License
 

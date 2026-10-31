@@ -11,7 +11,7 @@
 - `Executor.Run(context.Context, []Call, func(Result) error) error` emits each result synchronously, before the next call starts. An emit error stops execution.
 - `InvokeHandler(*Executor) blaze.HandlerFunc` and `ListToolsHandler(*Executor) blaze.HandlerFunc` can be mounted on authenticated engine/group routes.
 
-A `Call` contains `ID`, `Name`, and `Input` (`json.RawMessage`). Empty input means `{}`. IDs must be unique within a batch, valid UTF-8, nonempty, and at most 128 bytes. Names must identify registered tools. Inputs must be valid JSON objects within the configured byte limit. Schema metadata is not runtime validation: handlers validate domain inputs.
+A `Call` contains `ID`, `Name`, and `Input` (`json.RawMessage`). Empty input means `{}`. IDs must be unique within a batch, valid UTF-8, nonempty, and at most 128 bytes. Names must identify registered tools. Inputs must be valid JSON objects within the configured byte limit. Each input is then validated against the tool's `InputSchema` before its handler runs (see [Schema validation](#schema-validation)).
 
 ## HTTP API
 
@@ -60,6 +60,20 @@ Execution is sequential and synchronous. Context deadlines are cooperative: a ca
 `Config` zero values select: 16 calls, 32 KiB input/call, 256 KiB encoded output/call, 1 MiB aggregate successful output, 1 MiB HTTP body, 30s call context, and 60s batch context. Negative configuration values are rejected. Once the aggregate output budget is exceeded, later calls are skipped; once the batch deadline expires, remaining calls are not executed.
 
 Output bounds apply after JSON encoding, not to arbitrary allocations inside a handler. Supply application concurrency/admission limits and idempotency where needed. Duplicate IDs are rejected within a batch; retries across requests are **not** deduplicated.
+
+## Schema validation
+
+`NewExecutor` compiles every tool's `InputSchema`. Before a handler runs, its arguments are checked against it. A violation is a per-call result with code `invalid_arguments`; the handler is not called, and other calls in the batch still run. The message lists up to 8 problems with JSON paths, so a model can correct its call:
+
+```text
+arguments do not match the input schema: $: missing required property "city"; $: unknown property "extra"; $.units: must be one of ["metric","imperial"], got "kelvin"
+```
+
+Supported keywords: `type` (string or list; `integer` accepts `2.0`), `enum`, `const`, `properties`, `required`, `additionalProperties` (bool or schema), `minProperties`, `maxProperties`, `items` (single schema), `minItems`, `maxItems`, `uniqueItems`, `minLength`/`maxLength` (Unicode code points), `pattern` (Go RE2, unanchored), `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `allOf`, `anyOf`, `oneOf`, `not`, and boolean schemas. Annotations such as `description`, `default`, `examples` and `format` are ignored.
+
+Keywords that would change the result but are not implemented (`$ref`, `if`/`then`/`else`, `patternProperties`, `propertyNames`, `dependentRequired`, `dependentSchemas`, `contains`, `prefixItems`, `unevaluated*`) make `NewExecutor` fail with an error naming the keyword and its location, instead of being skipped silently. Inline the definitions, or set `Config.DisableSchemaValidation` to register the schema unvalidated; handlers then receive any JSON object.
+
+A schema cannot express authorization or most domain rules, so handlers should still check those. The built-in tools set `"additionalProperties": false` and also decode strictly.
 
 ## Providers
 

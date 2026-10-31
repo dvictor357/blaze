@@ -58,7 +58,7 @@ Call correlation is preserved; outputs are not combined into an assistant string
 
 `Tool.ToOpenAI()` yields `OpenAIToolDef{Type:"function", Function:...}`; `Function.Parameters` is a schema object, not an encoded string. `adapter.ListToolsHandler(ex)` exposes all definitions in its `openai` field. Protect the discovery route like the execution route.
 
-The schema is model-facing metadata. Blaze does not enforce full JSON Schema validation: handlers validate required fields, types, permitted values, and authorization.
+Before a handler runs, the executor validates the arguments against the tool's schema. A violation becomes a correlated `invalid_arguments` tool message listing each problem with its JSON path (for example `$.units: must be one of ["metric","imperial"]`), so the model can correct its call; the handler is not called. Handlers still enforce authorization and domain rules a schema cannot express. See [schema validation](../../adapter/README.md#schema-validation) for the supported keywords.
 
 ## HTTP and streaming
 

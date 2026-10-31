@@ -112,7 +112,8 @@ func NewWebReadTool(client *WebClient) adapter.Tool {
 					"description": "The absolute URL to read (e.g., 'https://example.com/article')",
 				},
 			},
-			"required": []string{"url"},
+			"required":             []string{"url"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {

@@ -34,7 +34,8 @@ func NewWebFetchTool(client *WebClient) adapter.Tool {
 					"description": "Optional custom request headers (string values; at most 16)",
 				},
 			},
-			"required": []string{"url"},
+			"required":             []string{"url"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {

@@ -42,8 +42,9 @@ import (
 
 const maxTextStatsBytes = 10_000
 
-// textStatsTool is a small deterministic custom tool. It validates its own
-// input: Blaze passes a JSON object but does not enforce the schema.
+// textStatsTool is a small deterministic custom tool. The executor validates
+// arguments against the schema before the handler runs; the handler still
+// decodes strictly and checks the byte limit, which the schema cannot express.
 func textStatsTool() adapter.Tool {
 	return adapter.NewTool(
 		"text_stats",
@@ -56,7 +57,8 @@ func textStatsTool() adapter.Tool {
 					"description": "The text to analyze (at most 10000 bytes)",
 				},
 			},
-			"required": []string{"text"},
+			"required":             []string{"text"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {

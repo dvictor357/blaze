@@ -43,7 +43,8 @@ func NewWebSearchTool(client *WebClient) adapter.Tool {
 					"description": "Maximum number of results to return (default: 5, max: 10)",
 				},
 			},
-			"required": []string{"query"},
+			"required":             []string{"query"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {

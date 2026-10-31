@@ -182,7 +182,8 @@ func NewMemoryTool(store *MemoryStore) adapter.Tool {
 					"description": "Inclusive end index for lrange (default: -1 = last item)",
 				},
 			},
-			"required": []string{"action"},
+			"required":             []string{"action"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			scope, ok := MemoryScopeFrom(ctx)

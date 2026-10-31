@@ -49,7 +49,7 @@ An empty return message means the current response contained no tool calls; do n
 
 `Tool.ToAnthropic()` yields `AnthropicToolDef` with `name`, `description`, and object-shaped `input_schema`. `adapter.ListToolsHandler(ex)` exposes these definitions in its `anthropic` field.
 
-Input schemas are descriptive model metadata, not generic runtime validation. Tool handlers must validate their domain input and authorization. Error messages are returned to callers/models; do not include secrets.
+Arguments are validated against `input_schema` before the handler runs. A violation becomes an `is_error` tool result with code `invalid_arguments` and a list of problems with JSON paths, so the model can retry; the handler is not called. See [schema validation](../../adapter/README.md#schema-validation) for the supported keywords. Handlers still enforce authorization and domain rules. Error messages are returned to callers/models; do not include secrets.
 
 ## HTTP and streaming
 

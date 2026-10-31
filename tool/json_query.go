@@ -47,7 +47,8 @@ func NewJSONQueryTool() adapter.Tool {
 					"description": "Action: 'get' (extract value), 'keys' (list keys), 'length' (count items), 'type' (get type), 'flatten' (flatten array), 'unique' (deduplicate array)",
 				},
 			},
-			"required": []string{"json", "query"},
+			"required":             []string{"json", "query"},
+			"additionalProperties": false,
 		},
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {

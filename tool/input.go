@@ -9,9 +9,9 @@ import (
 )
 
 // decodeInput strictly decodes a tool's JSON input into v: unknown fields,
-// wrong types and trailing data are errors. Blaze does not validate inputs
-// against tool schemas, so every built-in tool validates through this and its
-// own domain checks.
+// wrong types and trailing data are errors. The executor already validates
+// inputs against each tool's schema; decoding strictly keeps the handlers safe
+// when they are called directly or with Config.DisableSchemaValidation.
 func decodeInput(input json.RawMessage, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(input))
 	dec.DisallowUnknownFields()
