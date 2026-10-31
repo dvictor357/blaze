@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/). Before 1.0, minor versions may contain breaking changes.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-01
 
 First tagged release. Two modules are tagged together: `github.com/dvictor357/blaze` (`v0.1.0`) and `github.com/dvictor357/blaze/mcp` (`mcp/v0.1.0`).
 
