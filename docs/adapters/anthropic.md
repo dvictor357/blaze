@@ -1,256 +1,58 @@
-# Anthropic Adapter
+# Anthropic tool conversions
 
-A powerful adapter that transforms your Blaze framework into a Claude-compatible API server, enabling Claude to call your custom tools during conversations.
+Blaze provides pure conversions for Anthropic tool definitions and tool-use/result blocks. It does not call Claude, implement the Messages API, generate assistant responses, or report model token usage.
 
-## Overview
+## Correct message direction
 
-The Anthropic Adapter bridges Claude's tool-calling API with your custom Go functions. It handles all the complex JSON formatting, streaming responses, and tool execution that Claude expects.
+1. Your application sends `Tool.ToAnthropic()` definitions to Claude using its own provider client.
+2. Claude's **assistant** message contains `tool_use` blocks. Retain that complete assistant message, including any text/thinking content, in the conversation.
+3. Convert its current tool-use blocks with `adapter.AnthropicCalls` and execute those explicit calls.
+4. `adapter.AnthropicToolResultMessage` builds the following **user** message containing correlated `tool_result` blocks.
+5. Send the updated conversation back to Claude.
 
-## Quick Start
+A tool result is not an assistant message. Do not put assistant tool-use blocks in a user request or replay older conversation calls.
 
-### 1. Define Your Tools
+## Conversion example
 
 ```go
-calculatorTool := adapter.NewTool(
-    "calculator",
-    "Perform basic mathematical calculations",
-    map[string]any{
-        "type": "object",
-        "properties": map[string]any{
-            "expression": map[string]any{
-                "type":        "string",
-                "description": "Mathematical expression to evaluate",
-            },
-        },
-        "required": []string{"expression"},
-    },
-    func(input json.RawMessage) (any, error) {
-        var data struct {
-            Expression string `json:"expression"`
-        }
-        json.Unmarshal(input, &data)
-        // Your logic here
-        return map[string]any{"result": 42}, nil
-    },
+package integration
+
+import (
+    "context"
+
+    "github.com/dvictor357/blaze/adapter"
 )
-```
 
-### 2. Register the Adapter
-
-```go
-engine := blaze.New()
-engine.POST("/chat", adapter.AnthropicAdapter(calculatorTool, weatherTool))
-engine.Listen(":8080")
-```
-
-### 3. Call from Claude
-
-```json
-POST /chat
-{
-  "model": "claude-3-5-sonnet-20241022",
-  "messages": [
-    {"role": "user", "content": "Calculate 2 + 2"}
-  ],
-  "tools": [
-    {
-      "name": "calculator",
-      "description": "Perform basic mathematical calculations",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "expression": {"type": "string"}
-        },
-        "required": ["expression"]
-      }
+func ExecuteAnthropicTools(ctx context.Context, ex *adapter.Executor, current []adapter.AnthropicContentBlock) (adapter.AnthropicMessage, error) {
+    calls, err := adapter.AnthropicCalls(current)
+    if err != nil {
+        return adapter.AnthropicMessage{}, err
     }
-  ]
-}
-```
-
----
-
-## How It Works
-
-```
-Claude Client
-    ↓ HTTP POST /chat (JSON with tool_use blocks)
-Blaze Router
-    ↓ Routes to AnthropicAdapter
-AnthropicAdapter
-    ↓ Parses request
-    ↓ Extracts tool_use blocks
-    ↓ Executes tool handlers
-    ↓ Formats streaming response
-Claude Client
-    ↓ Receives streaming JSON events
-    ↓ Processes tool results
-```
-
----
-
-## Tool Handler Function
-
-Your tool handler signature:
-
-```go
-func(json.RawMessage) (any, error)
-```
-
-### Input
-- `json.RawMessage`: Raw JSON of the tool parameters
-- Parse with `json.Unmarshal(input, &data)`
-
-### Output
-- `any`: The result (will be JSON-serialized)
-- `error`: Return an error if something goes wrong
-
-### Example: Weather Tool
-
-```go
-weatherTool := adapter.NewTool(
-    "weather",
-    "Get weather for a location",
-    map[string]any{
-        "type": "object",
-        "properties": map[string]any{
-            "location": map[string]any{
-                "type":        "string",
-                "description": "City name",
-            },
-        },
-        "required": []string{"location"},
-    },
-    func(input json.RawMessage) (any, error) {
-        var data struct {
-            Location string `json:"location"`
-        }
-        if err := json.Unmarshal(input, &data); err != nil {
-            return nil, err
-        }
-        
-        weather, err := fetchWeather(data.Location)
-        if err != nil {
-            return nil, err
-        }
-        
-        return map[string]any{
-            "location":  data.Location,
-            "temp":      weather.Temp,
-            "condition": weather.Condition,
-        }, nil
-    },
-)
-```
-
----
-
-## Response Format
-
-The adapter formats responses in Claude's expected streaming format:
-
-```json
-{"type": "message_start", "message": {"id": "msg_1", "role": "assistant"}}
-{"type": "content_block_start", "content_block": {"type": "text", "text": "Processing..."}}
-{"type": "content_block_delta", "delta": {"type": "tool_result", "text": "{\"result\": 4}"}}
-{"type": "message_stop", "stop_reason": "end_turn"}
-```
-
----
-
-## Error Handling
-
-### Tool Handler Errors
-
-```go
-func(input json.RawMessage) (any, error) {
-    if invalid {
-        return nil, fmt.Errorf("something went wrong")
+    if len(calls) == 0 {
+        return adapter.AnthropicMessage{}, nil
     }
-    return result, nil
+    results, err := ex.Execute(ctx, calls)
+    if err != nil {
+        return adapter.AnthropicMessage{}, err
+    }
+    return adapter.AnthropicToolResultMessage(results)
 }
 ```
 
-Errors are automatically wrapped in a `tool_result` block.
+An empty return message means the current response contained no tool calls; do not append it. Your provider client owns conversion to/from its SDK types and preservation of the original assistant content. These helpers are not a replacement for the provider's full message schema.
 
-### Missing Tools
+`AnthropicCalls` reads only supplied `tool_use` blocks, ignores other block types, and requires a tool-use ID. Inputs are `json.RawMessage`, preserving large-integer JSON values. Missing input becomes `{}` during execution. The executor validates the full batch before running any call.
 
-If Claude calls a tool that doesn't exist:
+`AnthropicToolResults` returns one `tool_result` block per result. Each block carries the original `tool_use_id`; failures set `is_error:true` and encode structured error content. `AnthropicToolResultMessage` wraps those blocks in `role:"user"`.
 
-```json
-{
-  "type": "tool_result",
-  "tool_use_id": "xyz",
-  "content": "Tool not found"
-}
-```
+## Definitions and validation
 
----
+`Tool.ToAnthropic()` yields `AnthropicToolDef` with `name`, `description`, and object-shaped `input_schema`. `adapter.ListToolsHandler(ex)` exposes these definitions in its `anthropic` field.
 
-## Architecture
+Input schemas are descriptive model metadata, not generic runtime validation. Tool handlers must validate their domain input and authorization. Error messages are returned to callers/models; do not include secrets.
 
-```
-┌─────────────────────────────────────┐
-│         Claude (Client)             │
-└──────────────┬──────────────────────┘
-               │ HTTP POST /chat
-               ▼
-┌─────────────────────────────────────┐
-│         Blaze Framework             │
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│     AnthropicAdapter               │
-│  - Parses tool_use blocks          │
-│  - Routes to tool handlers         │
-│  - Formats streaming response      │
-└──────────────┬──────────────────────┘
-               │
-        ┌──────┴──────┐
-        ▼             ▼
-    Tool A        Tool B
-   Handler       Handler
-```
+## HTTP and streaming
 
----
+The [Blaze invocation API](../../adapter/README.md) accepts explicit `calls`, not Anthropic Messages API requests. Its `result`/`done` SSE events are **not** Anthropic model events. Assemble tool inputs from a provider stream before invoking them.
 
-## Features
-
-| Feature | Status |
-|---------|--------|
-| Streaming Responses | ✅ |
-| JSON Schema Validation | ✅ |
-| Error Handling | ✅ |
-| Multiple Tools | ✅ |
-| Type Safe Handlers | ✅ |
-| Middleware Compatible | ✅ |
-
----
-
-## Tips
-
-1. **Use JSON Schemas**: Help Claude understand your tool parameters
-2. **Return Structured Data**: Use maps/slices for complex results
-3. **Handle Errors**: Always return meaningful error messages
-4. **Keep Handlers Fast**: Tools should execute quickly for better UX
-5. **Validate Input**: Check parameters in your handler function
-
----
-
-## Use Cases
-
-- **APIs**: Expose existing APIs as Claude tools
-- **Databases**: Query databases with natural language
-- **Calculations**: Perform complex calculations
-- **File Operations**: Read/write files, process data
-- **External Services**: Integrate with third-party services
-- **Custom Logic**: Any Go function Claude can call
-
----
-
-## See Also
-
-- [OpenAI Adapter](openai.md) - For GPT models
-- [Built-in Tools](../tools/) - Pre-built tools
-- [Examples](../../examples/main.go) - Complete working example
+Conversions never search conversation history. Explicitly submitting a call again executes it again; sensitive tools need application-owned idempotency.

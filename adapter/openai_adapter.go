@@ -3,109 +3,50 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
-	"time"
-
-	"github.com/dvictor357/blaze"
+	"strings"
 )
 
-// ============================================================================
-// OpenAI Types
-// ============================================================================
+// This file converts between Blaze tools and OpenAI function-calling wire
+// shapes. Blaze never talks to a model: the application sends the tool
+// definitions to its model, passes the model's CURRENT tool calls to
+// OpenAICalls, executes them, and appends OpenAIToolMessages to the
+// conversation. Conversion works on exactly the calls it is given and never
+// reads conversation history.
 
-// OpenAIToolDef represents an OpenAI tool definition
+// OpenAIToolDef is an entry of the "tools" array of a chat completion request.
 type OpenAIToolDef struct {
 	Type     string            `json:"type"` // always "function"
 	Function OpenAIFunctionDef `json:"function"`
 }
 
-// OpenAIFunctionDef represents the function details within a tool
+// OpenAIFunctionDef describes a function tool.
 type OpenAIFunctionDef struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	Parameters  any    `json:"parameters"` // JSON Schema
+	Parameters  any    `json:"parameters"` // JSON Schema object
 }
 
-// OpenAIMessage represents an OpenAI chat message
-type OpenAIMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
-	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-}
-
-// OpenAIToolCall represents a tool call from the assistant
+// OpenAIToolCall is a tool call produced by the model in an assistant message.
 type OpenAIToolCall struct {
 	ID       string             `json:"id"`
 	Type     string             `json:"type"` // "function"
 	Function OpenAIFunctionCall `json:"function"`
 }
 
-// OpenAIFunctionCall represents the function call details
+// OpenAIFunctionCall carries the function name and its JSON-string arguments.
 type OpenAIFunctionCall struct {
 	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // JSON string
+	Arguments string `json:"arguments"`
 }
 
-// OpenAIChatRequest represents an OpenAI chat completion request
-type OpenAIChatRequest struct {
-	Model    string          `json:"model"`
-	Messages []OpenAIMessage `json:"messages"`
-	Tools    []OpenAIToolDef `json:"tools,omitempty"`
-	Stream   bool            `json:"stream,omitempty"`
+// OpenAIToolMessage is the "tool" role message that answers one tool call.
+type OpenAIToolMessage struct {
+	Role       string `json:"role"` // always "tool"
+	ToolCallID string `json:"tool_call_id"`
+	Content    string `json:"content"`
 }
 
-// OpenAIChatResponse represents an OpenAI chat completion response
-type OpenAIChatResponse struct {
-	ID      string         `json:"id"`
-	Object  string         `json:"object"`
-	Created int64          `json:"created"`
-	Model   string         `json:"model"`
-	Choices []OpenAIChoice `json:"choices"`
-	Usage   OpenAIUsage    `json:"usage,omitempty"`
-}
-
-// OpenAIChoice represents a choice in the response
-type OpenAIChoice struct {
-	Index        int           `json:"index"`
-	Message      OpenAIMessage `json:"message"`
-	FinishReason string        `json:"finish_reason"`
-}
-
-// OpenAIUsage represents token usage information
-type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
-
-// OpenAIStreamChunk represents a streaming response chunk
-type OpenAIStreamChunk struct {
-	ID      string               `json:"id"`
-	Object  string               `json:"object"`
-	Created int64                `json:"created"`
-	Model   string               `json:"model"`
-	Choices []OpenAIStreamChoice `json:"choices"`
-}
-
-// OpenAIStreamChoice represents a choice in a streaming chunk
-type OpenAIStreamChoice struct {
-	Index        int            `json:"index"`
-	Delta        OpenAIDelta    `json:"delta"`
-	FinishReason *string        `json:"finish_reason"`
-}
-
-// OpenAIDelta represents the delta content in streaming
-type OpenAIDelta struct {
-	Role      string           `json:"role,omitempty"`
-	Content   string           `json:"content,omitempty"`
-	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
-}
-
-// ============================================================================
-// Tool Conversion Methods
-// ============================================================================
-
-// ToOpenAI converts a Tool to OpenAI tool definition format
+// ToOpenAI converts a Tool to an OpenAI tool definition.
 func (t Tool) ToOpenAI() OpenAIToolDef {
 	return OpenAIToolDef{
 		Type: "function",
@@ -117,279 +58,61 @@ func (t Tool) ToOpenAI() OpenAIToolDef {
 	}
 }
 
-// ToAnthropic converts a Tool to Anthropic tool definition format
-func (t Tool) ToAnthropic() map[string]any {
-	return map[string]any{
-		"name":         t.Name,
-		"description":  t.Description,
-		"input_schema": t.InputSchema,
+// OpenAICalls converts the tool calls of the model's current assistant
+// message into Calls, preserving call IDs. Empty arguments (which models send
+// for parameterless functions) become {}. Anything else is passed through
+// unchanged and validated by the Executor before any call runs.
+func OpenAICalls(calls []OpenAIToolCall) ([]Call, error) {
+	out := make([]Call, len(calls))
+	for i, tc := range calls {
+		if tc.Type != "" && tc.Type != "function" {
+			return nil, fmt.Errorf("adapter: tool call %d (%q): unsupported type %q", i, tc.ID, tc.Type)
+		}
+		args := strings.TrimSpace(tc.Function.Arguments)
+		if args == "" {
+			args = "{}"
+		}
+		out[i] = Call{ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(args)}
 	}
+	return out, nil
 }
 
-// ============================================================================
-// OpenAI Adapter
-// ============================================================================
-
-// OpenAIAdapter creates a Blaze handler that processes OpenAI-format requests
-// and executes registered tools
-func OpenAIAdapter(tools ...Tool) blaze.HandlerFunc {
-	toolMap := make(map[string]Tool)
-	for _, tool := range tools {
-		toolMap[tool.Name] = tool
+// OpenAIToolMessages converts results into "tool" role messages, one per
+// result, in order, keyed by tool_call_id. Successful content is the tool's
+// JSON output; failures are {"error":{"code":...,"message":...}}. OpenAI has
+// no error flag on tool messages, so errors are conveyed in the content.
+func OpenAIToolMessages(results []Result) ([]OpenAIToolMessage, error) {
+	out := make([]OpenAIToolMessage, len(results))
+	for i, r := range results {
+		content, err := resultContent(r)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = OpenAIToolMessage{Role: "tool", ToolCallID: r.ID, Content: content}
 	}
-
-	return func(ctx *blaze.Context) error {
-		var req OpenAIChatRequest
-		if err := ctx.BindJSON(&req); err != nil {
-			return ctx.JSON(400, map[string]any{
-				"error": map[string]any{
-					"message": fmt.Sprintf("Invalid request: %v", err),
-					"type":    "invalid_request_error",
-				},
-			})
-		}
-
-		if len(req.Messages) == 0 {
-			return ctx.JSON(400, map[string]any{
-				"error": map[string]any{
-					"message": "Messages array is required",
-					"type":    "invalid_request_error",
-				},
-			})
-		}
-
-		// Find tool calls in the last assistant message
-		var toolCalls []OpenAIToolCall
-		for i := len(req.Messages) - 1; i >= 0; i-- {
-			msg := req.Messages[i]
-			if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-				toolCalls = msg.ToolCalls
-				break
-			}
-		}
-
-		// If no tool calls found, return available tools info
-		if len(toolCalls) == 0 {
-			return handleNoToolCalls(ctx, req, tools)
-		}
-
-		// Execute each tool call
-		toolResults := make([]OpenAIMessage, 0, len(toolCalls))
-		for _, tc := range toolCalls {
-			tool, exists := toolMap[tc.Function.Name]
-			if !exists {
-				toolResults = append(toolResults, OpenAIMessage{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    fmt.Sprintf(`{"error": "Tool '%s' not found"}`, tc.Function.Name),
-				})
-				continue
-			}
-
-			// Execute the tool handler
-			result, err := tool.Handler(json.RawMessage(tc.Function.Arguments))
-			if err != nil {
-				toolResults = append(toolResults, OpenAIMessage{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    fmt.Sprintf(`{"error": "%v"}`, err),
-				})
-				continue
-			}
-
-			// Convert result to JSON string
-			resultBytes, _ := json.Marshal(result)
-			toolResults = append(toolResults, OpenAIMessage{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Content:    string(resultBytes),
-			})
-		}
-
-		// Return response based on streaming preference
-		if req.Stream {
-			return streamOpenAIResponse(ctx, req.Model, toolResults)
-		}
-		return sendOpenAIResponse(ctx, req.Model, toolResults)
-	}
+	return out, nil
 }
 
-// handleNoToolCalls returns a response when no tool calls are present
-func handleNoToolCalls(ctx *blaze.Context, req OpenAIChatRequest, tools []Tool) error {
-	// Build tool list for response
-	toolDefs := make([]OpenAIToolDef, len(tools))
-	for i, t := range tools {
-		toolDefs[i] = t.ToOpenAI()
-	}
-
-	// Get last user message
-	var lastUserContent string
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			lastUserContent = req.Messages[i].Content
-			break
+// resultContent renders a result as the JSON text a model receives. All JSON
+// is produced by the encoder, so messages are always escaped correctly.
+func resultContent(r Result) (string, error) {
+	if r.OK {
+		if len(r.Output) == 0 {
+			return "", fmt.Errorf("adapter: result %q is OK but has no output", r.ID)
 		}
-	}
-
-	response := OpenAIChatResponse{
-		ID:      generateID("chatcmpl"),
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   req.Model,
-		Choices: []OpenAIChoice{
-			{
-				Index: 0,
-				Message: OpenAIMessage{
-					Role:    "assistant",
-					Content: fmt.Sprintf("I have access to %d tools. To use them, include tool_calls in your request. Your message: %s", len(tools), lastUserContent),
-				},
-				FinishReason: "stop",
-			},
-		},
-		Usage: OpenAIUsage{
-			PromptTokens:     10,
-			CompletionTokens: 20,
-			TotalTokens:      30,
-		},
-	}
-
-	return ctx.JSON(200, response)
-}
-
-// sendOpenAIResponse sends a non-streaming response
-func sendOpenAIResponse(ctx *blaze.Context, model string, toolResults []OpenAIMessage) error {
-	// Combine tool results into content
-	var combinedContent string
-	for _, result := range toolResults {
-		combinedContent += result.Content + "\n"
-	}
-
-	response := OpenAIChatResponse{
-		ID:      generateID("chatcmpl"),
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []OpenAIChoice{
-			{
-				Index: 0,
-				Message: OpenAIMessage{
-					Role:    "assistant",
-					Content: combinedContent,
-				},
-				FinishReason: "stop",
-			},
-		},
-		Usage: OpenAIUsage{
-			PromptTokens:     10,
-			CompletionTokens: len(combinedContent) / 4,
-			TotalTokens:      10 + len(combinedContent)/4,
-		},
-	}
-
-	return ctx.JSON(200, response)
-}
-
-// streamOpenAIResponse sends a streaming SSE response
-func streamOpenAIResponse(ctx *blaze.Context, model string, toolResults []OpenAIMessage) error {
-	ch := make(chan any)
-
-	go func() {
-		defer close(ch)
-
-		id := generateID("chatcmpl")
-		created := time.Now().Unix()
-
-		// Send initial chunk with role
-		ch <- OpenAIStreamChunk{
-			ID:      id,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
-			Choices: []OpenAIStreamChoice{
-				{
-					Index: 0,
-					Delta: OpenAIDelta{
-						Role: "assistant",
-					},
-					FinishReason: nil,
-				},
-			},
+		if !json.Valid(r.Output) {
+			return "", fmt.Errorf("adapter: result %q has invalid JSON output", r.ID)
 		}
-
-		// Send content chunks for each tool result
-		for _, result := range toolResults {
-			ch <- OpenAIStreamChunk{
-				ID:      id,
-				Object:  "chat.completion.chunk",
-				Created: created,
-				Model:   model,
-				Choices: []OpenAIStreamChoice{
-					{
-						Index: 0,
-						Delta: OpenAIDelta{
-							Content: result.Content + "\n",
-						},
-						FinishReason: nil,
-					},
-				},
-			}
-		}
-
-		// Send final chunk with finish_reason
-		stopReason := "stop"
-		ch <- OpenAIStreamChunk{
-			ID:      id,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
-			Choices: []OpenAIStreamChoice{
-				{
-					Index:        0,
-					Delta:        OpenAIDelta{},
-					FinishReason: &stopReason,
-				},
-			},
-		}
-	}()
-
-	return ctx.StreamJSON(ch)
-}
-
-// ============================================================================
-// ListTools Handler
-// ============================================================================
-
-// ToolListResponse represents the response from ListTools endpoint
-type ToolListResponse struct {
-	OpenAI    []OpenAIToolDef  `json:"openai"`
-	Anthropic []map[string]any `json:"anthropic"`
-	Count     int              `json:"count"`
-}
-
-// ListToolsHandler creates a handler that returns available tools in multiple formats
-func ListToolsHandler(tools ...Tool) blaze.HandlerFunc {
-	return func(ctx *blaze.Context) error {
-		openaiTools := make([]OpenAIToolDef, len(tools))
-		anthropicTools := make([]map[string]any, len(tools))
-
-		for i, t := range tools {
-			openaiTools[i] = t.ToOpenAI()
-			anthropicTools[i] = t.ToAnthropic()
-		}
-
-		return ctx.JSON(200, ToolListResponse{
-			OpenAI:    openaiTools,
-			Anthropic: anthropicTools,
-			Count:     len(tools),
-		})
+		return string(r.Output), nil
 	}
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-// generateID creates a unique ID with the given prefix
-func generateID(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	if r.Error == nil {
+		return "", fmt.Errorf("adapter: result %q is neither OK nor an error", r.ID)
+	}
+	b, err := json.Marshal(struct {
+		Error *CallError `json:"error"`
+	}{r.Error})
+	if err != nil {
+		return "", fmt.Errorf("adapter: encode error for result %q: %w", r.ID, err)
+	}
+	return string(b), nil
 }

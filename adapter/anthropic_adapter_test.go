@@ -1,353 +1,126 @@
 package adapter
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"strings"
 	"testing"
-
-	"github.com/dvictor357/blaze"
 )
 
-// TestAnthropicAdapter_ToolExecution tests that tool_use blocks are executed correctly
-func TestAnthropicAdapter_ToolExecution(t *testing.T) {
-	// Create a simple echo tool
-	echoTool := NewTool(
-		"echo",
-		"Echo back the input",
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"message": map[string]any{
-					"type":        "string",
-					"description": "Message to echo",
-				},
-			},
-			"required": []string{"message"},
-		},
-		func(input json.RawMessage) (any, error) {
-			var data struct {
-				Message string `json:"message"`
-			}
-			json.Unmarshal(input, &data)
-			return map[string]any{"echoed": data.Message}, nil
-		},
-	)
+func TestToAnthropic(t *testing.T) {
+	ex := mustExecutor(t, Config{}, echoTool())
 
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter(echoTool))
-
-	// Create request with tool_use block
-	reqBody := AnthropicChatRequest{
-		Model: "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{
-			{
-				Role: "user",
-				Content: []AnthropicContentBlock{
-					{
-						Type:  "tool_use",
-						ID:    "toolu_123",
-						Name:  "echo",
-						Input: map[string]any{"message": "hello world"},
-					},
-				},
-			},
-		},
+	raw, err := json.Marshal(ex.Tools()[0].ToAnthropic())
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rec.Code)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
 	}
-
-	var resp AnthropicChatResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
-	}
-
-	if len(resp.Content) != 1 {
-		t.Fatalf("Expected 1 content block, got %d", len(resp.Content))
-	}
-
-	if resp.Content[0].Type != "tool_result" {
-		t.Errorf("Expected type 'tool_result', got '%s'", resp.Content[0].Type)
-	}
-
-	if !strings.Contains(resp.Content[0].Content, "hello world") {
-		t.Errorf("Expected content to contain 'hello world', got: %s", resp.Content[0].Content)
+	schema, _ := got["input_schema"].(map[string]any)
+	if got["name"] != "echo" || got["description"] != "Echo back the message" || schema["type"] != "object" {
+		t.Errorf("definition = %s", raw)
 	}
 }
 
-// TestAnthropicAdapter_NoToolUse tests response when no tool_use blocks are present
-func TestAnthropicAdapter_NoToolUse(t *testing.T) {
-	echoTool := NewTool("echo", "Echo back the input", nil, nil)
-
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter(echoTool))
-
-	reqBody := AnthropicChatRequest{
-		Model: "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{
-			{Role: "user", Content: "Hello, Claude!"},
-		},
+func TestAnthropicCalls_TakesToolUseFromAssistantContent(t *testing.T) {
+	assistant := []AnthropicContentBlock{
+		{Type: "text", Text: "Let me check."},
+		{Type: "tool_use", ID: "toolu_1", Name: "echo", Input: json.RawMessage(`{"message":"hi"}`)},
+		{Type: "tool_use", ID: "toolu_2", Name: "echo"}, // no input
+	}
+	calls, err := AnthropicCalls(assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2 (text blocks are ignored)", len(calls))
+	}
+	if calls[0].ID != "toolu_1" || calls[0].Name != "echo" || string(calls[0].Input) != `{"message":"hi"}` {
+		t.Errorf("call 0 = %+v", calls[0])
+	}
+	if calls[1].ID != "toolu_2" || len(calls[1].Input) != 0 {
+		t.Errorf("call 1 = %+v", calls[1])
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rec.Code)
+	if calls, err := AnthropicCalls([]AnthropicContentBlock{{Type: "text", Text: "just text"}}); err != nil || len(calls) != 0 {
+		t.Errorf("text-only content = %v, %v; want no calls", calls, err)
 	}
-
-	var resp AnthropicChatResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
-	}
-
-	if len(resp.Content) != 1 {
-		t.Fatalf("Expected 1 content block, got %d", len(resp.Content))
-	}
-
-	if !strings.Contains(resp.Content[0].Text, "1 tools") {
-		t.Errorf("Expected content to mention available tools, got: %s", resp.Content[0].Text)
+	if _, err := AnthropicCalls([]AnthropicContentBlock{{Type: "tool_use", Name: "echo"}}); err == nil {
+		t.Error("a tool_use without an id cannot be answered and must be rejected")
 	}
 }
 
-// TestAnthropicAdapter_ToolNotFound tests error handling for unknown tools
-func TestAnthropicAdapter_ToolNotFound(t *testing.T) {
-	echoTool := NewTool("echo", "Echo back the input", nil, nil)
-
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter(echoTool))
-
-	reqBody := AnthropicChatRequest{
-		Model: "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{
-			{
-				Role: "user",
-				Content: []AnthropicContentBlock{
-					{
-						Type:  "tool_use",
-						ID:    "toolu_456",
-						Name:  "unknown_tool",
-						Input: map[string]any{},
-					},
-				},
-			},
-		},
+func TestAnthropicCalls_PreservesInputBytes(t *testing.T) {
+	// Decoding the model's tool_use block and converting it must not
+	// reformat numbers or reorder keys.
+	var block AnthropicContentBlock
+	src := `{"type":"tool_use","id":"toolu_9","name":"echo","input":{"b":12345678901234567890,"a":1.50}}`
+	if err := json.Unmarshal([]byte(src), &block); err != nil {
+		t.Fatal(err)
 	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rec.Code)
+	calls, err := AnthropicCalls([]AnthropicContentBlock{block})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	var resp AnthropicChatResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
-	}
-
-	if !strings.Contains(resp.Content[0].Content, "not found") {
-		t.Errorf("Expected error message about tool not found, got: %s", resp.Content[0].Content)
+	if string(calls[0].Input) != `{"b":12345678901234567890,"a":1.50}` {
+		t.Errorf("input = %s", calls[0].Input)
 	}
 }
 
-// TestAnthropicAdapter_InvalidRequest tests error handling for invalid requests
-func TestAnthropicAdapter_InvalidRequest(t *testing.T) {
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter())
+func TestAnthropic_FullToolCycle(t *testing.T) {
+	failing := NewTool("explode", "always fails", nil, func(ctx context.Context, in json.RawMessage) (any, error) {
+		return nil, errors.New(`said "no"`)
+	})
+	ex := mustExecutor(t, Config{}, echoTool(), failing)
 
-	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader("invalid json"))
-	req.Header.Set("Content-Type", "application/json")
+	calls, err := AnthropicCalls([]AnthropicContentBlock{
+		{Type: "tool_use", ID: "toolu_ok", Name: "echo", Input: json.RawMessage(`{"message":"hello"}`)},
+		{Type: "tool_use", ID: "toolu_bad", Name: "explode", Input: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := ex.Execute(context.Background(), calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := AnthropicToolResultMessage(results)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
+	// Tool results travel in a USER message.
+	if msg.Role != "user" || len(msg.Content) != 2 {
+		t.Fatalf("message = %+v", msg)
+	}
+	ok, bad := msg.Content[0], msg.Content[1]
+	if ok.Type != "tool_result" || ok.ToolUseID != "toolu_ok" || ok.IsError || ok.Content != `{"echoed":"hello"}` {
+		t.Errorf("success block = %+v", ok)
+	}
+	if bad.Type != "tool_result" || bad.ToolUseID != "toolu_bad" || !bad.IsError {
+		t.Errorf("failure block = %+v", bad)
+	}
+	var failure struct {
+		Error CallError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(bad.Content), &failure); err != nil || failure.Error.Message != `said "no"` {
+		t.Errorf("failure content = %q (%v)", bad.Content, err)
+	}
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d", rec.Code)
+	// Wire shape: is_error only appears on failures.
+	wire, _ := json.Marshal(msg)
+	if strings.Count(string(wire), `"is_error":true`) != 1 || strings.Contains(string(wire), `"is_error":false`) {
+		t.Errorf("wire = %s", wire)
 	}
 }
 
-// TestAnthropicAdapter_EmptyMessages tests error handling for empty messages
-func TestAnthropicAdapter_EmptyMessages(t *testing.T) {
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter())
-
-	reqBody := AnthropicChatRequest{
-		Model:    "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d", rec.Code)
-	}
-}
-
-// TestAnthropicAdapter_LastMessageNotUser tests error when last message isn't from user
-func TestAnthropicAdapter_LastMessageNotUser(t *testing.T) {
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter())
-
-	reqBody := AnthropicChatRequest{
-		Model: "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{
-			{Role: "assistant", Content: "Hello!"},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d", rec.Code)
-	}
-}
-
-// TestAnthropicAdapter_MultipleToolCalls tests executing multiple tools in one request
-func TestAnthropicAdapter_MultipleToolCalls(t *testing.T) {
-	addTool := NewTool("add", "Add numbers", nil,
-		func(input json.RawMessage) (any, error) {
-			return map[string]any{"result": 42}, nil
-		},
-	)
-	multiplyTool := NewTool("multiply", "Multiply numbers", nil,
-		func(input json.RawMessage) (any, error) {
-			return map[string]any{"result": 100}, nil
-		},
-	)
-
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter(addTool, multiplyTool))
-
-	reqBody := AnthropicChatRequest{
-		Model: "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{
-			{
-				Role: "user",
-				Content: []AnthropicContentBlock{
-					{Type: "tool_use", ID: "toolu_1", Name: "add", Input: map[string]any{}},
-					{Type: "tool_use", ID: "toolu_2", Name: "multiply", Input: map[string]any{}},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rec.Code)
-	}
-
-	var resp AnthropicChatResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
-	}
-
-	if len(resp.Content) != 2 {
-		t.Errorf("Expected 2 tool results, got %d", len(resp.Content))
-	}
-}
-
-// TestAnthropicAdapter_ResponseFormat tests the response format matches Anthropic spec
-func TestAnthropicAdapter_ResponseFormat(t *testing.T) {
-	tool := NewTool("test", "Test tool", nil,
-		func(input json.RawMessage) (any, error) {
-			return map[string]any{"ok": true}, nil
-		},
-	)
-
-	e := blaze.New()
-	e.POST("/chat", AnthropicAdapter(tool))
-
-	reqBody := AnthropicChatRequest{
-		Model: "claude-3-5-sonnet",
-		Messages: []AnthropicMessage{
-			{
-				Role: "user",
-				Content: []AnthropicContentBlock{
-					{Type: "tool_use", ID: "toolu_test", Name: "test", Input: map[string]any{}},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	var resp AnthropicChatResponse
-	json.Unmarshal(rec.Body.Bytes(), &resp)
-
-	// Verify required fields
-	if resp.ID == "" {
-		t.Error("Expected non-empty ID")
-	}
-	if resp.Type != "message" {
-		t.Errorf("Expected type 'message', got '%s'", resp.Type)
-	}
-	if resp.Role != "assistant" {
-		t.Errorf("Expected role 'assistant', got '%s'", resp.Role)
-	}
-	if resp.Model != "claude-3-5-sonnet" {
-		t.Errorf("Expected model 'claude-3-5-sonnet', got '%s'", resp.Model)
-	}
-	if resp.StopReason != "end_turn" {
-		t.Errorf("Expected stop_reason 'end_turn', got '%s'", resp.StopReason)
-	}
-}
-
-// TestParseContentBlocks tests the content parsing function
-func TestParseContentBlocks(t *testing.T) {
-	// Test string content
-	blocks := parseContentBlocks("Hello world")
-	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "Hello world" {
-		t.Error("Failed to parse string content")
-	}
-
-	// Test array content
-	arrayContent := []AnthropicContentBlock{
-		{Type: "text", Text: "Hello"},
-		{Type: "tool_use", ID: "123", Name: "test"},
-	}
-	blocks = parseContentBlocks(arrayContent)
-	if len(blocks) != 2 {
-		t.Errorf("Expected 2 blocks, got %d", len(blocks))
+func TestAnthropicToolResults_RejectInconsistentResults(t *testing.T) {
+	for _, r := range []Result{{ID: "1", OK: true}, {ID: "2"}} {
+		if _, err := AnthropicToolResults([]Result{r}); err == nil {
+			t.Errorf("result %+v was accepted", r)
+		}
 	}
 }

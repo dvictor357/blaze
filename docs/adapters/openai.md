@@ -1,269 +1,67 @@
-# OpenAI Adapter
+# OpenAI tool conversions
 
-An adapter that enables OpenAI GPT models and OpenAI-compatible clients to interact with Blaze tools using the Chat Completions API format.
+Blaze provides pure conversions for OpenAI Chat Completions function-tool definitions, current tool calls, and tool-result messages. It does not implement Chat Completions, call a model, generate assistant text, or estimate token usage.
 
-## Overview
+## Model interaction
 
-The OpenAI Adapter processes OpenAI-format tool calling requests, enabling GPT models and any system using the OpenAI Chat Completions API to use the same tools as Claude.
+Your application performs this cycle:
 
-## Quick Start
+1. Convert registered tools with `Tool.ToOpenAI()` and send those definitions in your model request.
+2. Keep the model's assistant message in the conversation.
+3. Pass only that response's **current** `tool_calls` to `adapter.OpenAICalls`.
+4. Execute the resulting calls with your executor.
+5. Convert results with `adapter.OpenAIToolMessages` and append them after the assistant message.
+6. Send the updated conversation back to your model.
 
-### 1. Define Your Tools (Same as Anthropic)
+Do not resubmit completed calls from older assistant messages. Conversions never inspect history, and executing an explicit call again repeats its side effects.
 
-```go
-tools := []adapter.Tool{
-    adapter.NewTool(
-        "calculator",
-        "Perform calculations",
-        map[string]any{
-            "type": "object",
-            "properties": map[string]any{
-                "expression": map[string]any{"type": "string"},
-            },
-            "required": []string{"expression"},
-        },
-        func(input json.RawMessage) (any, error) {
-            // Your logic here
-            return map[string]any{"result": 42}, nil
-        },
-    ),
-    tool.NewWebSearchTool(),
-    tool.NewDateTimeTool(),
-}
-```
+## Conversion example
 
-### 2. Register the Adapter
+The following function accepts current, non-streaming/fully assembled tool calls, not conversation history:
 
 ```go
-engine := blaze.New()
+package integration
 
-// OpenAI-compatible endpoint
-engine.POST("/openai", adapter.OpenAIAdapter(tools...))
+import (
+    "context"
 
-// Optional: Tool discovery
-engine.GET("/tools", adapter.ListToolsHandler(tools...))
+    "github.com/dvictor357/blaze/adapter"
+)
 
-engine.Listen(":8080")
-```
-
-### 3. Call with OpenAI Format
-
-```bash
-curl -X POST http://localhost:8080/openai \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4",
-    "messages": [
-      {"role": "user", "content": "What time is it in Tokyo?"},
-      {
-        "role": "assistant",
-        "tool_calls": [{
-          "id": "call_abc123",
-          "type": "function",
-          "function": {
-            "name": "datetime",
-            "arguments": "{\"action\": \"now\", \"timezone\": \"Asia/Tokyo\"}"
-          }
-        }]
-      }
-    ]
-  }'
-```
-
----
-
-## How It Works
-
-```
-OpenAI-Compatible Client
-    ↓ HTTP POST /openai (JSON with tool_calls)
-Blaze Router
-    ↓ Routes to OpenAIAdapter
-OpenAIAdapter
-    ↓ Parses request
-    ↓ Finds tool_calls in assistant message
-    ↓ Executes tool handlers
-    ↓ Formats response (streaming or regular)
-Client
-    ↓ Receives tool results
-```
-
----
-
-## Request Format
-
-OpenAI uses `tool_calls` in assistant messages:
-
-```json
-{
-  "model": "gpt-4",
-  "messages": [
-    {"role": "user", "content": "Search for golang"},
-    {
-      "role": "assistant",
-      "tool_calls": [{
-        "id": "call_1",
-        "type": "function",
-        "function": {
-          "name": "web_search",
-          "arguments": "{\"query\": \"golang best practices\"}"
-        }
-      }]
+func ExecuteOpenAITools(ctx context.Context, ex *adapter.Executor, current []adapter.OpenAIToolCall) ([]adapter.OpenAIToolMessage, error) {
+    calls, err := adapter.OpenAICalls(current)
+    if err != nil {
+        return nil, err
     }
-  ]
-}
-```
-
-## Response Format
-
-The adapter returns OpenAI Chat Completions format:
-
-```json
-{
-  "id": "chatcmpl-123456789",
-  "object": "chat.completion",
-  "created": 1734444307,
-  "model": "gpt-4",
-  "choices": [{
-    "index": 0,
-    "message": {
-      "role": "assistant",
-      "content": "{\"results\": [...]}"
-    },
-    "finish_reason": "stop"
-  }],
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 50,
-    "total_tokens": 60
-  }
-}
-```
-
----
-
-## Streaming Support
-
-Enable streaming with `"stream": true`:
-
-```json
-{
-  "model": "gpt-4",
-  "stream": true,
-  "messages": [...]
-}
-```
-
-Response uses Server-Sent Events with chunked deltas.
-
----
-
-## Tool Discovery
-
-The `ListToolsHandler` returns tools in multiple formats:
-
-```go
-engine.GET("/tools", adapter.ListToolsHandler(tools...))
-```
-
-**Response:**
-
-```json
-{
-  "openai": [
-    {
-      "type": "function",
-      "function": {
-        "name": "web_search",
-        "description": "Search the web",
-        "parameters": {...}
-      }
+    if len(calls) == 0 {
+        return nil, nil
     }
-  ],
-  "anthropic": [
-    {
-      "name": "web_search",
-      "description": "Search the web",
-      "input_schema": {...}
+    results, err := ex.Execute(ctx, calls)
+    if err != nil {
+        return nil, err
     }
-  ],
-  "count": 8
+    return adapter.OpenAIToolMessages(results)
 }
 ```
 
----
+`OpenAIToolCall` holds `ID`, `Type`, and `Function` (`Name`, `Arguments`). Arguments are a JSON string; conversion preserves the JSON bytes, including large integers. Empty arguments become `{}`. Unsupported call types fail conversion. The executor validates known names, unique IDs, object-shaped inputs, and batch budgets before execution.
 
-## Format Conversion
+`OpenAIToolMessages` emits one message per result:
 
-Convert tools between formats programmatically:
+- `role: "tool"`
+- `tool_call_id`: the original call ID
+- `content`: JSON text of the successful output, or an encoded `{"error":{"code":...,"message":...}}`
 
-```go
-// To OpenAI format
-openaiDef := myTool.ToOpenAI()
-// Returns: OpenAIToolDef{Type: "function", Function: {...}}
+Call correlation is preserved; outputs are not combined into an assistant string. Handler error content is correctly escaped. Treat returned error messages as public to your model/caller and avoid putting secrets in them.
 
-// To Anthropic format
-anthropicDef := myTool.ToAnthropic()
-// Returns: map[string]any{"name": "...", "input_schema": {...}}
-```
+## Definitions and discovery
 
----
+`Tool.ToOpenAI()` yields `OpenAIToolDef{Type:"function", Function:...}`; `Function.Parameters` is a schema object, not an encoded string. `adapter.ListToolsHandler(ex)` exposes all definitions in its `openai` field. Protect the discovery route like the execution route.
 
-## Error Handling
+The schema is model-facing metadata. Blaze does not enforce full JSON Schema validation: handlers validate required fields, types, permitted values, and authorization.
 
-### Tool Not Found
+## HTTP and streaming
 
-```json
-{
-  "choices": [{
-    "message": {
-      "content": "{\"error\": \"Tool 'unknown' not found\"}"
-    }
-  }]
-}
-```
+An application can instead forward converted calls to Blaze's [explicit invocation API](../../adapter/README.md). That request uses `calls`, not `messages`, `model`, or `tools`. Its SSE stream is Blaze's `result`/`done` protocol, **not** OpenAI model SSE. If your model streams arguments, assemble each current tool call in your provider client before invoking it.
 
-### Invalid Request
-
-```json
-{
-  "error": {
-    "message": "Invalid request: ...",
-    "type": "invalid_request_error"
-  }
-}
-```
-
----
-
-## Comparison: OpenAI vs Anthropic
-
-| Aspect | Anthropic | OpenAI |
-|--------|-----------|--------|
-| **Endpoint** | `POST /chat` | `POST /openai` |
-| **Tool Def** | `input_schema` | `function.parameters` |
-| **Tool Calls** | `content[].tool_use` | `tool_calls[]` |
-| **Tool Results** | `tool_result` block | `role: "tool"` message |
-
-Both adapters share the same `Tool` struct and handlers.
-
----
-
-## Features
-
-| Feature | Status |
-|---------|--------|
-| Chat Completions Format | ✅ |
-| Tool Execution | ✅ |
-| Streaming Responses | ✅ |
-| Multi-format Discovery | ✅ |
-| Error Handling | ✅ |
-| Type Safe Handlers | ✅ |
-
----
-
-## See Also
-
-- [Anthropic Adapter](anthropic.md) - For Claude
-- [Built-in Tools](../tools/) - Pre-built tools
-- [Examples](../../examples/main.go) - Complete working example
+Blaze does not deduplicate requests or provide exactly-once execution. Use application-level idempotency for operations that cannot safely repeat.

@@ -1,96 +1,79 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/dvictor357/blaze/adapter"
 )
 
+const webFetchMaxBody = 50 * 1024
+
 // NewWebFetchTool creates a basic HTTP fetcher that returns raw content.
 // Use this when you need the unprocessed response (e.g., for APIs, JSON, raw data).
 // For reading webpages, prefer NewWebReadTool which provides clean Markdown.
-func NewWebFetchTool() adapter.Tool {
+//
+// Requests go through client (nil selects a new client with the default,
+// deny-private-networks policy). Custom headers are validated and are not
+// forwarded across cross-origin redirects.
+func NewWebFetchTool(client *WebClient) adapter.Tool {
+	client = webClientOrDefault(client)
 	return adapter.NewTool(
 		"web_fetch",
-		"Fetch raw content from a URL (HTTP GET). Returns unprocessed response body. Best for APIs or when you need raw data. For readable webpage content, use 'web_read' instead.",
+		"Fetch raw content from an http(s) URL (HTTP GET). Returns the unprocessed response body, capped at 50KB. Private, loopback and link-local addresses are blocked. Best for APIs or when you need raw data. For readable webpage content, use 'web_read' instead.",
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"url": map[string]any{
 					"type":        "string",
-					"description": "The URL to fetch",
+					"description": "The absolute http:// or https:// URL to fetch",
 				},
 				"headers": map[string]any{
 					"type":        "object",
-					"description": "Optional custom headers to send with the request",
+					"description": "Optional custom request headers (string values; at most 16)",
 				},
 			},
 			"required": []string{"url"},
 		},
-		func(input json.RawMessage) (any, error) {
+		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {
 				URL     string            `json:"url"`
 				Headers map[string]string `json:"headers"`
 			}
-			if err := json.Unmarshal(input, &data); err != nil {
-				return nil, fmt.Errorf("invalid input: %w", err)
+			if err := decodeInput(input, &data); err != nil {
+				return nil, err
 			}
 
-			if data.URL == "" {
-				return nil, fmt.Errorf("url cannot be empty")
-			}
-			if !strings.HasPrefix(data.URL, "http") {
-				data.URL = "https://" + data.URL
-			}
-
-			client := &http.Client{Timeout: 15 * time.Second}
-			req, err := http.NewRequest("GET", data.URL, nil)
+			header, err := sanitizeRequestHeaders(data.Headers)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create request: %w", err)
+				return nil, err
+			}
+			if header.Get("User-Agent") == "" {
+				header.Set("User-Agent", "BlazeBot/1.0")
 			}
 
-			// Set default User-Agent
-			req.Header.Set("User-Agent", "BlazeBot/1.0")
-
-			// Apply custom headers
-			for k, v := range data.Headers {
-				req.Header.Set(k, v)
-			}
-
-			resp, err := client.Do(req)
+			resp, err := client.Get(ctx, data.URL, header, webFetchMaxBody)
 			if err != nil {
-				return nil, fmt.Errorf("request failed: %w", err)
-			}
-			defer resp.Body.Close()
-
-			// Read body (limit to 50KB for raw fetch)
-			const MaxBodySize = 50 * 1024
-			body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodySize))
-			if err != nil {
-				return nil, fmt.Errorf("failed to read body: %w", err)
+				return nil, err
 			}
 
-			// Collect response headers
-			respHeaders := make(map[string]string)
+			// Set-Cookie is never relayed to the model.
+			respHeaders := make(map[string]string, len(resp.Header))
 			for k, v := range resp.Header {
-				if len(v) > 0 {
+				if len(v) > 0 && http.CanonicalHeaderKey(k) != "Set-Cookie" {
 					respHeaders[k] = v[0]
 				}
 			}
 
 			return map[string]any{
-				"status":       resp.StatusCode,
-				"url":          data.URL,
+				"status":       resp.Status,
+				"url":          resp.FinalURL,
 				"content_type": resp.Header.Get("Content-Type"),
 				"headers":      respHeaders,
-				"body":         string(body),
-				"size":         len(body),
-				"truncated":    len(body) >= MaxBodySize,
+				"body":         string(resp.Body),
+				"size":         len(resp.Body),
+				"truncated":    resp.Truncated,
 			}, nil
 		},
 	)

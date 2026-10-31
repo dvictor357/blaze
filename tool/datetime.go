@@ -1,12 +1,18 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/dvictor357/blaze/adapter"
 )
+
+// maxAddDays bounds day-based durations so the arithmetic cannot overflow
+// time.Duration.
+const maxAddDays = time.Duration(1<<63-1) / (24 * time.Hour)
 
 // NewDateTimeTool creates a tool for working with dates and times.
 // It can:
@@ -49,7 +55,7 @@ func NewDateTimeTool() adapter.Tool {
 			},
 			"required": []string{"action"},
 		},
-		func(input json.RawMessage) (any, error) {
+		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {
 				Action   string `json:"action"`
 				Timezone string `json:"timezone"`
@@ -58,8 +64,8 @@ func NewDateTimeTool() adapter.Tool {
 				Format   string `json:"format"`
 				Duration string `json:"duration"`
 			}
-			if err := json.Unmarshal(input, &data); err != nil {
-				return nil, fmt.Errorf("invalid input: %w", err)
+			if err := decodeInput(input, &data); err != nil {
+				return nil, err
 			}
 
 			// Default timezone
@@ -217,6 +223,9 @@ func dateDiff(date1, date2 string, loc *time.Location) (map[string]any, error) {
 	}
 
 	diff := t2.Sub(t1)
+	if !t1.Add(diff).Equal(t2) {
+		return nil, fmt.Errorf("date difference is outside the supported duration range")
+	}
 
 	days := int(diff.Hours() / 24)
 	hours := int(diff.Hours()) % 24
@@ -256,10 +265,12 @@ func addDuration(dateStr, duration string, loc *time.Location) (map[string]any, 
 	var dur time.Duration
 	if len(duration) > 1 && duration[len(duration)-1] == 'd' {
 		// Handle days
-		var days int
-		_, err := fmt.Sscanf(duration, "%dd", &days)
+		days, err := strconv.ParseInt(duration[:len(duration)-1], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid duration: %w", err)
+		}
+		if days > int64(maxAddDays) || days < -int64(maxAddDays) {
+			return nil, fmt.Errorf("invalid duration '%s': at most %d days", duration, maxAddDays)
 		}
 		dur = time.Duration(days) * 24 * time.Hour
 	} else {
