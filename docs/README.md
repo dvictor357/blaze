@@ -4,7 +4,10 @@ Blaze is a Go HTTP toolkit and tool-execution runtime. Your application owns mod
 
 ## Runtime and HTTP
 
-- [Project README](../README.md): setup, routing, limits, breaking changes, verification.
+- [Project README](../README.md): overview, quickstart, examples.
+- [Security model](security.md): guarantees, defaults, and what stays your job.
+- [MCP server](mcp.md): the same tools over stdio or Streamable HTTP.
+- [Testing, CI and live provider proof](testing.md).
 - [Execution API](../adapter/README.md): tool registration, full-batch validation, invocation/discovery, JSON/SSE results, cancellation.
 - [Runnable server](../examples/main.go): localhost listener, bearer authentication, trusted memory scope, custom text-statistics tool, and built-ins.
 
