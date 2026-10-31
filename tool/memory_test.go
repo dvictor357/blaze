@@ -897,11 +897,11 @@ func TestMemory_RejectsInvalidCalls(t *testing.T) {
 		{"action": ""},
 		{"action": "explode"},
 		{"action": "SET", "key": "k", "value": 1},
-		{"action": "set", "value": 1},                                  // no key
-		{"action": "set", "key": "k"},                                  // no value
-		{"action": "append", "key": "k"},                               // no value
-		{"action": "get"},                                              // no key
-		{"action": "set", "key": strings.Repeat("k", 257), "value": 1}, // key too long
+		{"action": "set", "value": 1},
+		{"action": "set", "key": "k"},
+		{"action": "append", "key": "k"},
+		{"action": "get"},
+		{"action": "set", "key": strings.Repeat("k", 257), "value": 1},
 		{"action": "lrange", "key": "k", "start": "zero"},
 		{"action": "set", "key": "k", "value": 1, "ttl": "soon"},
 	}
