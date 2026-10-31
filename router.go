@@ -1,164 +1,113 @@
 package blaze
 
 import (
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
 
-// node represents a node in the radix tree
-type node struct {
-	path     string      // path segment (compressed)
-	handler  HandlerFunc // handler if this node is an endpoint
-	children []*node     // child nodes (sorted by first char for binary search potential)
-	param    string      // parameter name if this is a :param node
-	wildcard bool        // true if this is a *wildcard node
-}
-
-// Router is a high-performance radix tree based router
-type Router struct {
-	trees map[string]*node // per-method trees for O(1) method lookup
-}
-
-func newRouter() *Router {
-	return &Router{
-		trees: make(map[string]*node),
+// register wires a handler into the standard library mux. Group middleware is
+// applied first (innermost), then engine middleware (outermost).
+func (e *Engine) register(method, pattern string, handler HandlerFunc, groupMiddleware []MiddlewareFunc) {
+	if method == "" || strings.ContainsAny(method, " \t\r\n") {
+		panic(fmt.Sprintf("blaze: invalid HTTP method %q", method))
 	}
-}
-
-// handle registers a new route
-func (r *Router) handle(method, path string, handler HandlerFunc) {
-	if r.trees[method] == nil {
-		r.trees[method] = &node{}
+	if !strings.HasPrefix(pattern, "/") {
+		panic(fmt.Sprintf("blaze: route pattern %q must start with \"/\"", pattern))
 	}
-	r.insert(r.trees[method], path, handler)
-}
-
-// insert adds a path to the radix tree
-func (r *Router) insert(root *node, path string, handler HandlerFunc) {
-	path = strings.TrimPrefix(path, "/")
-	if path == "" {
-		root.handler = handler
-		return
-	}
-
-	segments := splitPath(path)
-	current := root
-
-	for _, seg := range segments {
-		child := r.findChild(current, seg)
-		if child == nil {
-			child = &node{}
-			if strings.HasPrefix(seg, ":") {
-				child.param = seg[1:]
-				child.path = ":"
-			} else if strings.HasPrefix(seg, "*") {
-				child.wildcard = true
-				child.path = "*"
-				child.param = seg[1:]
-			} else {
-				child.path = seg
-			}
-			current.children = append(current.children, child)
-		}
-		current = child
-	}
-	current.handler = handler
-}
-
-// findChild finds a matching child node
-func (r *Router) findChild(n *node, seg string) *node {
-	for _, child := range n.children {
-		if child.path == seg {
-			return child
-		}
-		// Match param nodes
-		if child.path == ":" && strings.HasPrefix(seg, ":") {
-			return child
-		}
-	}
-	return nil
-}
-
-// lookup finds a handler and extracts params
-func (r *Router) lookup(method, path string) (HandlerFunc, map[string]string) {
-	root := r.trees[method]
-	if root == nil {
-		return nil, nil
-	}
-
-	path = strings.TrimPrefix(path, "/")
-	if path == "" {
-		return root.handler, map[string]string{}
-	}
-
-	segments := splitPath(path)
-	params := make(map[string]string)
-	current := root
-
-	for i, seg := range segments {
-		child := r.matchChild(current, seg, params)
-		if child == nil {
-			return nil, nil
-		}
-		// Wildcard captures rest of path
-		if child.wildcard {
-			params[child.param] = strings.Join(segments[i:], "/")
-			return child.handler, params
-		}
-		current = child
-	}
-
-	return current.handler, params
-}
-
-// matchChild finds a child that matches the segment
-func (r *Router) matchChild(n *node, seg string, params map[string]string) *node {
-	// First try exact match (fastest)
-	for _, child := range n.children {
-		if child.path == seg {
-			return child
-		}
-	}
-	// Then try param match
-	for _, child := range n.children {
-		if child.path == ":" {
-			params[child.param] = seg
-			return child
-		}
-	}
-	// Finally try wildcard
-	for _, child := range n.children {
-		if child.wildcard {
-			return child
-		}
-	}
-	return nil
-}
-
-// splitPath splits path into segments
-func splitPath(path string) []string {
-	path = strings.Trim(path, "/")
-	if path == "" {
-		return nil
-	}
-	return strings.Split(path, "/")
-}
-
-// ServeHTTP implements http.Handler
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	handler, params := r.lookup(req.Method, req.URL.Path)
 	if handler == nil {
-		http.NotFound(w, req)
+		panic(fmt.Sprintf("blaze: nil handler for %s %s", method, pattern))
+	}
+	for i := len(groupMiddleware) - 1; i >= 0; i-- {
+		handler = groupMiddleware[i](handler)
+	}
+	for i := len(e.middleware) - 1; i >= 0; i-- {
+		handler = e.middleware[i](handler)
+	}
+	// ServeMux panics on duplicate or ambiguous patterns, which surfaces
+	// route conflicts at startup instead of silently misrouting.
+	e.mux.Handle(method+" "+pattern, e.dispatch(handler))
+}
+
+func (e *Engine) dispatch(handler HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := newContext(w, r)
+		if err := handler(c); err != nil {
+			e.handleError(c, err)
+		}
+	})
+}
+
+func (e *Engine) handleError(c *Context, err error) {
+	if c.committed() {
+		log.Printf("blaze: %s %s: error after response started: %v", c.Request.Method, c.Request.URL.Path, err)
 		return
 	}
-
-	ctx := &Context{
-		ResponseWriter: w,
-		Request:        req,
-		params:         params,
+	if e.ErrorHandler != nil {
+		e.ErrorHandler(c, err)
+		return
 	}
-
-	if err := handler(ctx); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	defaultErrorHandler(c, err)
 }
+
+func defaultErrorHandler(c *Context, err error) {
+	var he *HTTPError
+	if errors.As(err, &he) {
+		status := he.Status
+		if status < 400 || status > 599 {
+			status = http.StatusInternalServerError
+		}
+		msg := he.Message
+		if msg == "" {
+			msg = http.StatusText(status)
+		}
+		_ = c.String(status, msg)
+		return
+	}
+	log.Printf("blaze: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+	_ = c.String(http.StatusInternalServerError, "Internal Server Error")
+}
+
+// statusWriter records whether and how the response was started so error
+// handling never appends to a committed response. It keeps Unwrap so
+// http.ResponseController (flush, deadlines, hijack) reaches the real writer.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	if !w.wrote {
+		w.status = code
+		w.wrote = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	if !w.wrote {
+		w.status = http.StatusOK
+		w.wrote = true
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// FlushError lets http.ResponseController flush through this wrapper while
+// keeping the committed flag accurate. An unsupported flush commits nothing.
+func (w *statusWriter) FlushError() error {
+	err := http.NewResponseController(w.ResponseWriter).Flush()
+	if err == nil && !w.wrote {
+		w.status = http.StatusOK
+		w.wrote = true
+	}
+	return err
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

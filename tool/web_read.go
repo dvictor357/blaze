@@ -1,17 +1,94 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"html"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
+	"unicode/utf8"
 
 	"github.com/dvictor357/blaze/adapter"
 )
+
+const (
+	webReadMaxBody    = 500 * 1024
+	webReadMaxContent = 8 * 1024
+	webReadMaxLinks   = 20
+)
+
+// Regular expressions are compiled once, not per request or per link.
+var (
+	reScript    = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	reStyle     = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	reNoscript  = regexp.MustCompile(`(?is)<noscript[^>]*>.*?</noscript>`)
+	reComment   = regexp.MustCompile(`(?is)<!--.*?-->`)
+	reBody      = regexp.MustCompile(`(?is)<body[^>]*>(.*?)</body>`)
+	reNav       = regexp.MustCompile(`(?is)<nav[^>]*>.*?</nav>`)
+	reHeader    = regexp.MustCompile(`(?is)<header[^>]*>.*?</header>`)
+	reFooter    = regexp.MustCompile(`(?is)<footer[^>]*>.*?</footer>`)
+	reAside     = regexp.MustCompile(`(?is)<aside[^>]*>.*?</aside>`)
+	reForm      = regexp.MustCompile(`(?is)<form[^>]*>.*?</form>`)
+	reTag       = regexp.MustCompile(`<[^>]+>`)
+	reBlankRuns = regexp.MustCompile(`\n{3,}`)
+	reSpaceRuns = regexp.MustCompile(`[ \t]+`)
+	reAnyWS     = regexp.MustCompile(`\s+`)
+
+	reTitle           = regexp.MustCompile(`(?is)<title[^>]*>([^<]+)</title>`)
+	reMetaDescription = regexp.MustCompile(`(?i)<meta[^>]*name="description"[^>]*content="([^"]*)"`)
+	reOGTitle         = regexp.MustCompile(`(?i)<meta[^>]*property="og:title"[^>]*content="([^"]*)"`)
+	reOGDescription   = regexp.MustCompile(`(?i)<meta[^>]*property="og:description"[^>]*content="([^"]*)"`)
+	reAnchor          = regexp.MustCompile(`(?is)<a\s[^>]*?href="([^"]*)"[^>]*>(.*?)</a>`)
+
+	reMainPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?is)<main[^>]*>(.*?)</main>`),
+		regexp.MustCompile(`(?is)<article[^>]*>(.*?)</article>`),
+		regexp.MustCompile(`(?is)<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>`),
+		regexp.MustCompile(`(?is)<div[^>]*id="content"[^>]*>(.*?)</div>`),
+		regexp.MustCompile(`(?is)<div[^>]*class="[^"]*post[^"]*"[^>]*>(.*?)</div>`),
+	}
+
+	mdRules = []mdRule{
+		// Code blocks first, so inline <code> handling does not break them.
+		{regexp.MustCompile(`(?is)<pre(?:\s[^>]*)?><code(?:\s[^>]*)?>(.*?)</code></pre>`), "\n```\n$1\n```\n"},
+		tagRule("pre", "\n```\n$1\n```\n"),
+		tagRule("h1", "\n# $1\n"),
+		tagRule("h2", "\n## $1\n"),
+		tagRule("h3", "\n### $1\n"),
+		tagRule("h4", "\n#### $1\n"),
+		tagRule("h5", "\n##### $1\n"),
+		tagRule("h6", "\n###### $1\n"),
+		tagRule("strong", "**$1**"),
+		tagRule("b", "**$1**"),
+		tagRule("em", "*$1*"),
+		tagRule("i", "*$1*"),
+		tagRule("code", "`$1`"),
+		{regexp.MustCompile(`(?is)<a\s[^>]*?href="([^"]*)"[^>]*>(.*?)</a>`), "[$2]($1)"},
+		{regexp.MustCompile(`(?is)<img\s[^>]*?src="([^"]*)"[^>]*?alt="([^"]*)"[^>]*>`), "![$2]($1)"},
+		{regexp.MustCompile(`(?is)<img\s[^>]*?alt="([^"]*)"[^>]*?src="([^"]*)"[^>]*>`), "![$1]($2)"},
+		tagRule("li", "- $1\n"),
+		tagRule("ul", "$1\n"),
+		tagRule("ol", "$1\n"),
+		tagRule("p", "$1\n\n"),
+		{regexp.MustCompile(`(?is)<br\s*/?>`), "\n"},
+		{regexp.MustCompile(`(?is)<hr\s*/?>`), "\n---\n"},
+		tagRule("blockquote", "> $1\n"),
+	}
+)
+
+type mdRule struct {
+	re   *regexp.Regexp
+	repl string
+}
+
+// tagRule matches <name ...>content</name> without also matching tags whose
+// names merely start with name (<b> vs <br>, <p> vs <pre>, <i> vs <img>).
+func tagRule(name, repl string) mdRule {
+	return mdRule{regexp.MustCompile(`(?is)<` + name + `(?:\s[^>]*)?>(.*?)</` + name + `>`), repl}
+}
 
 // NewWebReadTool creates an AI-native web reader that:
 // 1. Fetches the URL
@@ -20,271 +97,183 @@ import (
 // 4. Extracts metadata (title, description, links)
 //
 // This saves tokens and gives the AI readable content instead of HTML soup.
-func NewWebReadTool() adapter.Tool {
+// Requests go through client (nil selects a new client with the default,
+// deny-private-networks policy).
+func NewWebReadTool(client *WebClient) adapter.Tool {
+	client = webClientOrDefault(client)
 	return adapter.NewTool(
 		"web_read",
-		"Read a webpage and return clean, readable content in Markdown format. Extracts the main article content, removes navigation/ads/clutter, and provides metadata. Use this to read documentation, articles, or any webpage.",
+		"Read a webpage and return clean, readable content in Markdown format. Extracts the main article content, removes navigation/ads/clutter, and provides metadata. Only absolute http:// or https:// URLs are supported, and private, loopback and link-local addresses are blocked.",
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"url": map[string]any{
 					"type":        "string",
-					"description": "The URL to read (e.g., 'https://example.com/article')",
+					"description": "The absolute URL to read (e.g., 'https://example.com/article')",
 				},
 			},
 			"required": []string{"url"},
 		},
-		func(input json.RawMessage) (any, error) {
+		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {
 				URL string `json:"url"`
 			}
-			if err := json.Unmarshal(input, &data); err != nil {
-				return nil, fmt.Errorf("invalid input: %w", err)
+			if err := decodeInput(input, &data); err != nil {
+				return nil, err
 			}
 
-			if data.URL == "" {
-				return nil, fmt.Errorf("url cannot be empty")
-			}
-			if !strings.HasPrefix(data.URL, "http") {
-				data.URL = "https://" + data.URL
-			}
+			header := http.Header{}
+			header.Set("User-Agent", "Mozilla/5.0 (compatible; BlazeBot/1.0; +https://github.com/dvictor357/blaze)")
+			header.Set("Accept", "text/html,application/xhtml+xml")
 
-			// Fetch the page
-			client := &http.Client{Timeout: 15 * time.Second}
-			req, _ := http.NewRequest("GET", data.URL, nil)
-			req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; BlazeBot/1.0; +https://github.com/dvictor357/blaze)")
-			req.Header.Set("Accept", "text/html,application/xhtml+xml")
-
-			resp, err := client.Do(req)
+			resp, err := client.Get(ctx, data.URL, header, webReadMaxBody)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch: %w", err)
 			}
-			defer resp.Body.Close()
 
-			// Limit to 500KB to prevent memory issues
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 500*1024))
-			if err != nil {
-				return nil, fmt.Errorf("failed to read body: %w", err)
-			}
+			doc := strings.ToValidUTF8(string(resp.Body), "")
 
-			html := string(body)
-
-			// Extract metadata
-			title := extractMeta(html, `<title[^>]*>([^<]+)</title>`)
-			description := extractMetaTag(html, "description")
-			ogTitle := extractMetaProperty(html, "og:title")
-			ogDesc := extractMetaProperty(html, "og:description")
-
+			title := cleanMeta(firstSubmatch(reTitle, doc))
+			description := cleanMeta(firstSubmatch(reMetaDescription, doc))
 			if title == "" {
-				title = ogTitle
+				title = cleanMeta(firstSubmatch(reOGTitle, doc))
 			}
 			if description == "" {
-				description = ogDesc
+				description = cleanMeta(firstSubmatch(reOGDescription, doc))
 			}
 
-			// Extract and clean main content
-			content := extractMainContent(html)
-			markdown := htmlToMarkdown(content)
+			markdown := htmlToMarkdown(extractMainContent(doc))
+			links := extractLinks(doc, resp.FinalURL)
 
-			// Extract links from the page
-			links := extractLinks(html, data.URL)
-
-			// Truncate markdown to preserve context window (max 8KB)
-			const MaxContentSize = 8 * 1024
-			truncated := false
-			if len(markdown) > MaxContentSize {
-				markdown = markdown[:MaxContentSize] + "\n\n[Content truncated...]"
+			// Truncate markdown to preserve context window
+			truncated := resp.Truncated
+			if len(markdown) > webReadMaxContent {
+				markdown = truncateUTF8(markdown, webReadMaxContent) + "\n\n[Content truncated...]"
 				truncated = true
 			}
 
 			return map[string]any{
-				"url":         data.URL,
+				"url":         resp.FinalURL,
 				"title":       title,
 				"description": description,
 				"content":     markdown,
 				"links":       links,
 				"truncated":   truncated,
-				"status":      resp.StatusCode,
+				"status":      resp.Status,
 			}, nil
 		},
 	)
 }
 
 // extractMainContent removes navigation, scripts, styles, and extracts the main content
-func extractMainContent(html string) string {
-	// Remove scripts and styles
-	html = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`).ReplaceAllString(html, "")
-	html = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`).ReplaceAllString(html, "")
-	html = regexp.MustCompile(`(?is)<noscript[^>]*>.*?</noscript>`).ReplaceAllString(html, "")
-	html = regexp.MustCompile(`(?is)<!--.*?-->`).ReplaceAllString(html, "")
+func extractMainContent(doc string) string {
+	doc = reScript.ReplaceAllString(doc, "")
+	doc = reStyle.ReplaceAllString(doc, "")
+	doc = reNoscript.ReplaceAllString(doc, "")
+	doc = reComment.ReplaceAllString(doc, "")
 
-	// Try to find main content areas (common patterns)
-	mainPatterns := []string{
-		`(?is)<main[^>]*>(.*?)</main>`,
-		`(?is)<article[^>]*>(.*?)</article>`,
-		`(?is)<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>`,
-		`(?is)<div[^>]*id="content"[^>]*>(.*?)</div>`,
-		`(?is)<div[^>]*class="[^"]*post[^"]*"[^>]*>(.*?)</div>`,
-	}
-
-	for _, pattern := range mainPatterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(html); len(matches) > 1 {
-			return matches[1]
+	for _, re := range reMainPatterns {
+		if m := re.FindStringSubmatch(doc); len(m) > 1 {
+			return m[1]
 		}
 	}
 
-	// Fallback: extract body content
-	bodyRe := regexp.MustCompile(`(?is)<body[^>]*>(.*?)</body>`)
-	if matches := bodyRe.FindStringSubmatch(html); len(matches) > 1 {
-		body := matches[1]
-		// Remove common non-content elements
-		body = regexp.MustCompile(`(?is)<nav[^>]*>.*?</nav>`).ReplaceAllString(body, "")
-		body = regexp.MustCompile(`(?is)<header[^>]*>.*?</header>`).ReplaceAllString(body, "")
-		body = regexp.MustCompile(`(?is)<footer[^>]*>.*?</footer>`).ReplaceAllString(body, "")
-		body = regexp.MustCompile(`(?is)<aside[^>]*>.*?</aside>`).ReplaceAllString(body, "")
-		body = regexp.MustCompile(`(?is)<form[^>]*>.*?</form>`).ReplaceAllString(body, "")
+	// Fallback: extract body content and drop common non-content elements
+	if m := reBody.FindStringSubmatch(doc); len(m) > 1 {
+		body := m[1]
+		for _, re := range []*regexp.Regexp{reNav, reHeader, reFooter, reAside, reForm} {
+			body = re.ReplaceAllString(body, "")
+		}
 		return body
 	}
 
-	return html
+	return doc
 }
 
 // htmlToMarkdown converts HTML to Markdown
-func htmlToMarkdown(html string) string {
-	md := html
-
-	// Convert headings
-	md = regexp.MustCompile(`(?is)<h1[^>]*>(.*?)</h1>`).ReplaceAllString(md, "\n# $1\n")
-	md = regexp.MustCompile(`(?is)<h2[^>]*>(.*?)</h2>`).ReplaceAllString(md, "\n## $1\n")
-	md = regexp.MustCompile(`(?is)<h3[^>]*>(.*?)</h3>`).ReplaceAllString(md, "\n### $1\n")
-	md = regexp.MustCompile(`(?is)<h4[^>]*>(.*?)</h4>`).ReplaceAllString(md, "\n#### $1\n")
-	md = regexp.MustCompile(`(?is)<h5[^>]*>(.*?)</h5>`).ReplaceAllString(md, "\n##### $1\n")
-	md = regexp.MustCompile(`(?is)<h6[^>]*>(.*?)</h6>`).ReplaceAllString(md, "\n###### $1\n")
-
-	// Convert formatting
-	md = regexp.MustCompile(`(?is)<strong[^>]*>(.*?)</strong>`).ReplaceAllString(md, "**$1**")
-	md = regexp.MustCompile(`(?is)<b[^>]*>(.*?)</b>`).ReplaceAllString(md, "**$1**")
-	md = regexp.MustCompile(`(?is)<em[^>]*>(.*?)</em>`).ReplaceAllString(md, "*$1*")
-	md = regexp.MustCompile(`(?is)<i[^>]*>(.*?)</i>`).ReplaceAllString(md, "*$1*")
-	md = regexp.MustCompile(`(?is)<code[^>]*>(.*?)</code>`).ReplaceAllString(md, "`$1`")
-
-	// Convert links
-	md = regexp.MustCompile(`(?is)<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).ReplaceAllString(md, "[$2]($1)")
-
-	// Convert images
-	md = regexp.MustCompile(`(?is)<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*/?>`).ReplaceAllString(md, "![$2]($1)")
-	md = regexp.MustCompile(`(?is)<img[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*/?>`).ReplaceAllString(md, "![$1]($2)")
-
-	// Convert lists
-	md = regexp.MustCompile(`(?is)<li[^>]*>(.*?)</li>`).ReplaceAllString(md, "- $1\n")
-	md = regexp.MustCompile(`(?is)<ul[^>]*>(.*?)</ul>`).ReplaceAllString(md, "$1\n")
-	md = regexp.MustCompile(`(?is)<ol[^>]*>(.*?)</ol>`).ReplaceAllString(md, "$1\n")
-
-	// Convert paragraphs and line breaks
-	md = regexp.MustCompile(`(?is)<p[^>]*>(.*?)</p>`).ReplaceAllString(md, "$1\n\n")
-	md = regexp.MustCompile(`(?is)<br\s*/?>`).ReplaceAllString(md, "\n")
-	md = regexp.MustCompile(`(?is)<hr\s*/?>`).ReplaceAllString(md, "\n---\n")
-
-	// Convert blockquotes
-	md = regexp.MustCompile(`(?is)<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllString(md, "> $1\n")
-
-	// Convert pre/code blocks
-	md = regexp.MustCompile(`(?is)<pre[^>]*><code[^>]*>(.*?)</code></pre>`).ReplaceAllString(md, "\n```\n$1\n```\n")
-	md = regexp.MustCompile(`(?is)<pre[^>]*>(.*?)</pre>`).ReplaceAllString(md, "\n```\n$1\n```\n")
-
-	// Remove remaining HTML tags
-	md = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(md, "")
-
-	// Decode common HTML entities
-	md = strings.ReplaceAll(md, "&nbsp;", " ")
-	md = strings.ReplaceAll(md, "&amp;", "&")
-	md = strings.ReplaceAll(md, "&lt;", "<")
-	md = strings.ReplaceAll(md, "&gt;", ">")
-	md = strings.ReplaceAll(md, "&quot;", "\"")
-	md = strings.ReplaceAll(md, "&#39;", "'")
-	md = strings.ReplaceAll(md, "&apos;", "'")
-
-	// Clean up whitespace
-	md = regexp.MustCompile(`\n{3,}`).ReplaceAllString(md, "\n\n")
-	md = regexp.MustCompile(`[ \t]+`).ReplaceAllString(md, " ")
-	md = strings.TrimSpace(md)
-
-	return md
+func htmlToMarkdown(doc string) string {
+	md := doc
+	for _, rule := range mdRules {
+		md = rule.re.ReplaceAllString(md, rule.repl)
+	}
+	md = reTag.ReplaceAllString(md, "")
+	md = html.UnescapeString(md)
+	md = reBlankRuns.ReplaceAllString(md, "\n\n")
+	md = reSpaceRuns.ReplaceAllString(md, " ")
+	return strings.TrimSpace(md)
 }
 
-// extractMeta extracts content matching a regex pattern
-func extractMeta(html, pattern string) string {
-	re := regexp.MustCompile(pattern)
-	if matches := re.FindStringSubmatch(html); len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
+func firstSubmatch(re *regexp.Regexp, s string) string {
+	if m := re.FindStringSubmatch(s); len(m) > 1 {
+		return m[1]
 	}
 	return ""
 }
 
-// extractMetaTag extracts content from <meta name="..." content="...">
-func extractMetaTag(html, name string) string {
-	pattern := fmt.Sprintf(`(?i)<meta[^>]*name="%s"[^>]*content="([^"]*)"`, name)
-	return extractMeta(html, pattern)
+func cleanMeta(s string) string {
+	return strings.TrimSpace(html.UnescapeString(s))
 }
 
-// extractMetaProperty extracts content from <meta property="..." content="...">
-func extractMetaProperty(html, property string) string {
-	pattern := fmt.Sprintf(`(?i)<meta[^>]*property="%s"[^>]*content="([^"]*)"`, property)
-	return extractMeta(html, pattern)
-}
+// extractLinks extracts http(s) links from the page with their text. Relative
+// links are resolved against baseURL; if the base is unusable no links are
+// returned.
+func extractLinks(doc, baseURL string) []map[string]string {
+	base, err := url.Parse(baseURL)
+	if err != nil || base == nil {
+		return nil
+	}
 
-// extractLinks extracts all links from the page with their text
-func extractLinks(html, baseURL string) []map[string]string {
 	var links []map[string]string
 	seen := make(map[string]bool)
 
-	re := regexp.MustCompile(`(?is)<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`)
-	matches := re.FindAllStringSubmatch(html, -1)
-
-	base, _ := url.Parse(baseURL)
-
-	for _, match := range matches {
+	for _, match := range reAnchor.FindAllStringSubmatch(doc, 200) {
 		if len(match) < 3 {
 			continue
 		}
 
-		href := strings.TrimSpace(match[1])
-		text := strings.TrimSpace(regexp.MustCompile(`<[^>]+>`).ReplaceAllString(match[2], ""))
+		href := strings.TrimSpace(html.UnescapeString(match[1]))
+		text := strings.TrimSpace(reAnyWS.ReplaceAllString(reTag.ReplaceAllString(match[2], ""), " "))
 
-		// Skip empty, javascript, or anchor-only links
-		if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") {
+		// Skip empty and anchor-only links
+		if href == "" || strings.HasPrefix(href, "#") {
 			continue
 		}
 
-		// Resolve relative URLs
-		if !strings.HasPrefix(href, "http") {
-			if parsed, err := base.Parse(href); err == nil {
-				href = parsed.String()
-			}
+		resolved, err := base.Parse(href)
+		if err != nil {
+			continue
 		}
+		if resolved.Scheme != "http" && resolved.Scheme != "https" {
+			continue // javascript:, mailto:, data: ...
+		}
+		resolved.Fragment = ""
+		href = resolved.String()
 
-		// Skip duplicates
 		if seen[href] {
 			continue
 		}
 		seen[href] = true
 
-		// Limit text length
 		if len(text) > 100 {
-			text = text[:100] + "..."
+			text = truncateUTF8(text, 100) + "..."
 		}
 
-		links = append(links, map[string]string{
-			"url":  href,
-			"text": text,
-		})
-
-		// Limit to 20 links to save tokens
-		if len(links) >= 20 {
+		links = append(links, map[string]string{"url": href, "text": text})
+		if len(links) >= webReadMaxLinks {
 			break
 		}
 	}
 
 	return links
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

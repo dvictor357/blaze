@@ -1,92 +1,35 @@
-# DateTime Tool
+# Datetime tool
 
-Time and timezone operations for AI agents.
+`tool.NewDateTimeTool()` returns a context-aware `adapter.Tool` for date/time operations. Inputs are JSON objects passed through the executor. Unknown fields and invalid action/timezone/date/duration inputs return tool errors.
 
-## Actions
+| Action | Required input | Behavior |
+|---|---|---|
+| `now` | `action` | Current time in the requested timezone |
+| `parse` | `date` | Parse a supported textual date |
+| `format` | `date` | Render a date in the requested layout/timezone |
+| `diff` | `date`, `date2` | Difference from the first date to the second |
+| `add` | `duration` | Add a duration to `date`, or current time if omitted |
 
-### `now` — Get Current Time
-
-```json
-{"action": "now", "timezone": "America/New_York"}
-```
-
-**Response:**
-```json
-{
-  "time": "2024-12-17T09:45:00-05:00",
-  "timezone": "America/New_York",
-  "unix": 1734444300
-}
-```
-
----
-
-### `parse` — Parse a Date
+`timezone` defaults to `UTC` and accepts installed IANA location names such as `America/New_York` or `Asia/Tokyo`.
 
 ```json
-{"action": "parse", "date": "2024-12-25"}
+{"action":"now","timezone":"Asia/Tokyo"}
 ```
-
-Supports various formats: ISO 8601, RFC822, Unix timestamps, and more.
-
----
-
-### `diff` — Calculate Difference
 
 ```json
-{"action": "diff", "date": "2024-01-01", "date2": "2024-12-31"}
+{"action":"parse","date":"2026-10-30"}
 ```
-
-**Response:**
-```json
-{
-  "days": 365,
-  "hours": 8760,
-  "human": "365 days"
-}
-```
-
----
-
-### `add` — Add Duration
 
 ```json
-{"action": "add", "date": "2024-01-01", "duration": "30d"}
+{"action":"diff","date":"2026-01-01","date2":"2026-01-03"}
 ```
 
-**Duration formats:**
-- `30s` — 30 seconds
-- `5m` — 5 minutes
-- `2h` — 2 hours
-- `7d` — 7 days
-- `1w` — 1 week
-
----
-
-## Capabilities
-
-| Feature | Description |
-|---------|-------------|
-| Current time | Any timezone |
-| Parse dates | Various formats |
-| Time differences | Between two dates |
-| Add/subtract | Durations |
-| Format dates | ISO, RFC822, Unix, human-readable |
-
----
-
-## Usage
-
-```go
-import "github.com/dvictor357/blaze/tool"
-
-datetimeTool := tool.NewDateTimeTool()
+```json
+{"action":"add","date":"2026-01-01","duration":"7d"}
 ```
 
----
+`parse` accepts RFC3339/RFC3339Nano, common ISO-like date/time layouts, `YYYY-MM-DD`, US `MM/DD/YYYY`, `DD-Mon-YYYY`, RFC1123, and RFC822. It does not parse Unix timestamp input. `format`, `diff`, and dated `add` accept RFC3339 or `YYYY-MM-DD`.
 
-## See Also
+`format` accepts `iso` (default), `rfc822`, `unix`, `human`, `date`, `time`, or a Go time layout. The `now` output includes `iso`, `unix`, `unix_milli`, `formatted`, `timezone`, and date components. A `diff` output contains total seconds/minutes/hours/days plus a day/hour/minute breakdown; it is not a calendar-month calculation. Differences outside the representable `time.Duration` range return an error.
 
-- [Web Tools](web.md)
-- [JSON Query Tool](json-query.md)
-- [Memory Tool](memory.md)
+Durations support Go duration strings such as `30s`, `5m`, `2h`, `-2h`, and an integer `d` suffix. A day is exactly 24 elapsed hours, not a calendar-day addition; week suffixes are not supported. Whole-day magnitudes are limited to 106,751 days to avoid duration overflow. Malformed and out-of-range durations return errors. The tool does not promise locale-dependent natural-language date parsing.

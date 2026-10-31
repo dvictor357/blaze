@@ -1,22 +1,33 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"html"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/dvictor357/blaze/adapter"
+)
+
+const webSearchMaxBody = 500 * 1024
+
+var (
+	reDDGLink    = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)</a>`)
+	reDDGSnippet = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>`)
+	reDDGAlt     = regexp.MustCompile(`(?is)<a[^>]*href="(/l/\?[^"]*uddg=([^&"]+)[^"]*)"[^>]*>([^<]+)</a>`)
 )
 
 // NewWebSearchTool creates a web search tool that uses DuckDuckGo.
 // No API key required - it scrapes the HTML results page.
 // This gives the AI the ability to search the internet for information.
-func NewWebSearchTool() adapter.Tool {
+// Requests go through client (nil selects a new client with the default,
+// deny-private-networks policy).
+func NewWebSearchTool(client *WebClient) adapter.Tool {
+	client = webClientOrDefault(client)
 	return adapter.NewTool(
 		"web_search",
 		"Search the web using DuckDuckGo and return a list of results with titles, URLs, and snippets. Use this to find information, documentation, or answers to questions. No API key required.",
@@ -34,17 +45,21 @@ func NewWebSearchTool() adapter.Tool {
 			},
 			"required": []string{"query"},
 		},
-		func(input json.RawMessage) (any, error) {
+		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var data struct {
 				Query      string `json:"query"`
 				MaxResults int    `json:"max_results"`
 			}
-			if err := json.Unmarshal(input, &data); err != nil {
-				return nil, fmt.Errorf("invalid input: %w", err)
+			if err := decodeInput(input, &data); err != nil {
+				return nil, err
 			}
 
+			data.Query = strings.TrimSpace(data.Query)
 			if data.Query == "" {
 				return nil, fmt.Errorf("query cannot be empty")
+			}
+			if len(data.Query) > 500 {
+				return nil, fmt.Errorf("query is too long (max 500 bytes)")
 			}
 
 			if data.MaxResults <= 0 {
@@ -54,7 +69,7 @@ func NewWebSearchTool() adapter.Tool {
 				data.MaxResults = 10
 			}
 
-			results, err := searchDuckDuckGo(data.Query, data.MaxResults)
+			results, err := searchDuckDuckGo(ctx, client, searchEndpoint, data.Query, data.MaxResults)
 			if err != nil {
 				return nil, err
 			}
@@ -68,6 +83,9 @@ func NewWebSearchTool() adapter.Tool {
 	)
 }
 
+// searchEndpoint is the DuckDuckGo HTML search page.
+const searchEndpoint = "https://html.duckduckgo.com/html/"
+
 // SearchResult represents a single search result
 type SearchResult struct {
 	Title   string `json:"title"`
@@ -76,198 +94,127 @@ type SearchResult struct {
 }
 
 // searchDuckDuckGo performs a search using DuckDuckGo's HTML interface
-func searchDuckDuckGo(query string, maxResults int) ([]SearchResult, error) {
-	// Use DuckDuckGo HTML interface (no JavaScript required)
-	searchURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
+func searchDuckDuckGo(ctx context.Context, client *WebClient, endpoint, query string, maxResults int) ([]SearchResult, error) {
+	header := http.Header{}
+	header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	header.Set("Accept-Language", "en-US,en;q=0.5")
 
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return nil // Follow redirects
-		},
-	}
-
-	req, err := http.NewRequest("GET", searchURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers to look like a browser
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-
-	resp, err := client.Do(req)
+	resp, err := client.Get(ctx, endpoint+"?q="+url.QueryEscape(query), header, webSearchMaxBody)
 	if err != nil {
 		return nil, fmt.Errorf("search request failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("search failed with status: %d", resp.StatusCode)
+	if resp.Status != http.StatusOK {
+		return nil, fmt.Errorf("search failed with status: %d", resp.Status)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 500*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	html := string(body)
-
-	// Parse DuckDuckGo HTML results
-	results := parseDuckDuckGoResults(html, maxResults)
-
+	doc := strings.ToValidUTF8(string(resp.Body), "")
+	results := parseDuckDuckGoResults(doc, maxResults)
 	if len(results) == 0 {
 		// Fallback: try alternate parsing
-		results = parseDuckDuckGoResultsAlt(html, maxResults)
+		results = parseDuckDuckGoResultsAlt(doc, maxResults)
 	}
-
 	return results, nil
 }
 
 // parseDuckDuckGoResults extracts search results from DuckDuckGo HTML
-func parseDuckDuckGoResults(html string, maxResults int) []SearchResult {
-	var results []SearchResult
+func parseDuckDuckGoResults(doc string, maxResults int) []SearchResult {
+	// DuckDuckGo HTML uses class="result__a" for the link and
+	// class="result__snippet" for the description.
+	links := reDDGLink.FindAllStringSubmatch(doc, maxResults*2)
+	snippets := reDDGSnippet.FindAllStringSubmatch(doc, maxResults*2)
 
-	// DuckDuckGo HTML uses class="result" for each result
-	// Each result has:
-	// - class="result__a" for the link
-	// - class="result__snippet" for the description
-
-	// Alternative: find individual components
-	linkPattern := regexp.MustCompile(`(?is)<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)</a>`)
-	snippetPattern := regexp.MustCompile(`(?is)<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>`)
-
-	links := linkPattern.FindAllStringSubmatch(html, maxResults*2)
-	snippets := snippetPattern.FindAllStringSubmatch(html, maxResults*2)
-
+	results := []SearchResult{}
+	seen := make(map[string]bool)
 	for i := 0; i < len(links) && len(results) < maxResults; i++ {
 		if len(links[i]) < 3 {
 			continue
 		}
 
-		rawURL := links[i][1]
-		title := cleanText(links[i][2])
-
 		// DuckDuckGo wraps URLs - extract the actual URL
-		actualURL := extractActualURL(rawURL)
+		actualURL := extractActualURL(html.UnescapeString(links[i][1]))
 		if actualURL == "" {
 			continue
 		}
+		// Skip ads and internal DDG links
+		if strings.Contains(actualURL, "duckduckgo.com") || seen[actualURL] {
+			continue
+		}
+		seen[actualURL] = true
 
 		snippet := ""
 		if i < len(snippets) && len(snippets[i]) > 1 {
 			snippet = cleanText(snippets[i][1])
 		}
 
-		// Skip ads and internal DDG links
-		if strings.Contains(actualURL, "duckduckgo.com") {
-			continue
-		}
-
 		results = append(results, SearchResult{
-			Title:   title,
+			Title:   cleanText(links[i][2]),
 			URL:     actualURL,
 			Snippet: snippet,
 		})
 	}
-
-	// Deduplicate by URL
-	seen := make(map[string]bool)
-	deduped := []SearchResult{}
-	for _, r := range results {
-		if !seen[r.URL] {
-			seen[r.URL] = true
-			deduped = append(deduped, r)
-		}
-	}
-
-	return deduped
+	return results
 }
 
 // parseDuckDuckGoResultsAlt is a fallback parser for different HTML structures
-func parseDuckDuckGoResultsAlt(html string, maxResults int) []SearchResult {
-	var results []SearchResult
+func parseDuckDuckGoResultsAlt(doc string, maxResults int) []SearchResult {
+	results := []SearchResult{}
 
-	// Try to find any links with titles
-	pattern := regexp.MustCompile(`(?is)<a[^>]*href="(/l/\?[^"]*uddg=([^&"]+)[^"]*)"[^>]*>([^<]+)</a>`)
-	matches := pattern.FindAllStringSubmatch(html, maxResults*2)
-
-	for _, match := range matches {
+	for _, match := range reDDGAlt.FindAllStringSubmatch(doc, maxResults*2) {
 		if len(match) < 4 || len(results) >= maxResults {
 			continue
 		}
 
-		encodedURL := match[2]
 		title := cleanText(match[3])
-
-		actualURL, err := url.QueryUnescape(encodedURL)
-		if err != nil {
+		actualURL, err := url.QueryUnescape(match[2])
+		if err != nil || title == "" || !isWebURL(actualURL) {
 			continue
 		}
 
-		if title == "" || actualURL == "" {
-			continue
-		}
-
-		results = append(results, SearchResult{
-			Title:   title,
-			URL:     actualURL,
-			Snippet: "",
-		})
+		results = append(results, SearchResult{Title: title, URL: actualURL})
 	}
 
 	return results
 }
 
-// extractActualURL extracts the real URL from DuckDuckGo's redirect URL
+// extractActualURL extracts the real URL from DuckDuckGo's redirect URL. Only
+// absolute http(s) URLs are returned.
 func extractActualURL(ddgURL string) string {
 	// DuckDuckGo uses URLs like: //duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com...
 	if strings.Contains(ddgURL, "uddg=") {
+		if strings.HasPrefix(ddgURL, "//") {
+			ddgURL = "https:" + ddgURL
+		}
 		parsed, err := url.Parse(ddgURL)
 		if err != nil {
 			return ""
 		}
-		encoded := parsed.Query().Get("uddg")
-		if encoded != "" {
-			decoded, err := url.QueryUnescape(encoded)
-			if err != nil {
-				return encoded
-			}
-			return decoded
+		if target := parsed.Query().Get("uddg"); target != "" && isWebURL(target) {
+			return target
 		}
-	}
-
-	// Handle direct URLs
-	if strings.HasPrefix(ddgURL, "http") {
-		return ddgURL
+		return ""
 	}
 
 	// Handle protocol-relative URLs
 	if strings.HasPrefix(ddgURL, "//") {
-		return "https:" + ddgURL
+		ddgURL = "https:" + ddgURL
 	}
-
+	if isWebURL(ddgURL) {
+		return ddgURL
+	}
 	return ""
+}
+
+// isWebURL reports whether s is an acceptable absolute http(s) URL.
+func isWebURL(s string) bool {
+	_, err := ParseWebURL(s)
+	return err == nil
 }
 
 // cleanText removes HTML tags and cleans up whitespace
 func cleanText(s string) string {
-	// Remove HTML tags
-	s = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(s, "")
-
-	// Decode HTML entities
-	s = strings.ReplaceAll(s, "&nbsp;", " ")
-	s = strings.ReplaceAll(s, "&amp;", "&")
-	s = strings.ReplaceAll(s, "&lt;", "<")
-	s = strings.ReplaceAll(s, "&gt;", ">")
-	s = strings.ReplaceAll(s, "&quot;", "\"")
-	s = strings.ReplaceAll(s, "&#39;", "'")
-	s = strings.ReplaceAll(s, "&apos;", "'")
-
-	// Clean whitespace
-	s = regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
-	s = strings.TrimSpace(s)
-
-	return s
+	s = reTag.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	s = reAnyWS.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
 }

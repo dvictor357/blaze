@@ -1,101 +1,31 @@
-# Blaze Documentation
+# Blaze documentation
 
-Welcome to the Blaze framework documentation. Blaze is a blazingly fast Go web framework with **built-in AI tools** for building Claude, OpenAI, and Gemini-compatible servers.
+Blaze is a Go HTTP toolkit and tool-execution runtime. Your application owns model requests, conversation state, credentials, authorization, and retries. Blaze runs explicitly selected calls; it is not an OpenAI/Anthropic model server.
 
-## Quick Links
+## Runtime and HTTP
 
-| Topic | Description |
-|-------|-------------|
-| [Getting Started](../README.md) | Main README with installation and quick start |
-| [Adapters](#adapters) | AI provider adapters for tool calling |
-| [Built-in Tools](#built-in-tools) | Pre-built tools for AI agents |
+- [Project README](../README.md): setup, routing, limits, breaking changes, verification.
+- [Execution API](../adapter/README.md): tool registration, full-batch validation, invocation/discovery, JSON/SSE results, cancellation.
+- [Runnable server](../examples/main.go): localhost listener, bearer authentication, trusted memory scope, custom text-statistics tool, and built-ins.
 
----
+## Provider conversions
 
-## Adapters
+- [OpenAI](adapters/openai.md): current function calls to explicit invocations; correlated tool-role results.
+- [Anthropic](adapters/anthropic.md): assistant tool-use blocks to explicit invocations; user tool-result reply.
 
-Adapters enable AI models to call your Go functions as tools. Each adapter translates between the AI provider's API format and Blaze's internal tool system.
+Both guides describe pure conversions, not HTTP model endpoints or model-stream protocols. Provider clients and external API calls remain application-owned.
 
-| Adapter | Documentation | Status |
-|---------|--------------|--------|
-| Anthropic (Claude) | [adapters/anthropic.md](adapters/anthropic.md) | ✅ Stable |
-| OpenAI (GPT) | [adapters/openai.md](adapters/openai.md) | ✅ Stable |
-| Gemini | Coming soon | 🚧 Planned |
+## Built-in tools
 
-### Architecture
+| Guide | Scope |
+|---|---|
+| [Web](tools/web.md) | Secure HTTP egress, raw fetch, best-effort HTML reading, DuckDuckGo search |
+| [Memory](tools/memory.md) | Owned stores, trusted request scopes, quotas, TTL, counters, lists |
+| [Datetime](tools/datetime.md) | Date/time actions and supported formats |
+| [JSON query](tools/json-query.md) | Path/filter syntax and transformation actions |
 
-```
-┌─────────────────────────────────────────────────┐
-│     AI Clients (Claude, GPT, Gemini, etc.)      │
-└──────────────────────┬──────────────────────────┘
-                       │ HTTP
-         ┌─────────────┼─────────────┐
-         ▼             ▼             ▼
-   POST /chat    POST /openai   GET /tools
-   (Anthropic)    (OpenAI)      (Discovery)
-         │             │             │
-         └─────────────┼─────────────┘
-                       ▼
-┌─────────────────────────────────────────────────┐
-│              Shared Tool Registry               │
-│   • Custom Tools (your Go functions)            │
-│   • Built-in Tools (web, datetime, memory...)   │
-└─────────────────────────────────────────────────┘
-```
-
-### Choosing an Adapter
-
-- **AnthropicAdapter**: Use when integrating with Claude
-- **OpenAIAdapter**: Use when integrating with GPT models or OpenAI-compatible APIs
-- **ListToolsHandler**: Discovery endpoint that returns tools in all formats
-
----
-
-## Built-in Tools
-
-Blaze ships with a comprehensive toolkit ready for AI agents:
-
-| Tool | Documentation | Description |
-|------|--------------|-------------|
-| Web Search | [tools/web.md](tools/web.md) | Search the internet (DuckDuckGo) |
-| Web Read | [tools/web.md](tools/web.md) | Read webpages as Markdown |
-| Web Fetch | [tools/web.md](tools/web.md) | Raw HTTP fetch for APIs |
-| DateTime | [tools/datetime.md](tools/datetime.md) | Time operations and timezone handling |
-| JSON Query | [tools/json-query.md](tools/json-query.md) | jq-like JSON querying |
-| Memory | [tools/memory.md](tools/memory.md) | In-memory key-value store |
-
----
-
-## Creating Custom Tools
-
-Define your own tools with the `adapter.NewTool()` function:
-
-```go
-myTool := adapter.NewTool(
-    "my_tool",                    // Name
-    "Description for the AI",     // Description
-    map[string]any{...},          // JSON Schema
-    func(input json.RawMessage) (any, error) {
-        // Your logic here
-        return result, nil
-    },
-)
-```
-
-See the adapter documentation for detailed examples.
-
----
-
-## Examples
-
-Check out [examples/main.go](../examples/main.go) for a complete working example with:
-- Custom tools (calculator, weather)
-- All built-in tools
-- Both Anthropic and OpenAI endpoints
-- Tool discovery endpoint
-
----
+Handlers receive a cancellation context and JSON object. Schema metadata informs the model; it is not generic runtime schema validation. Authenticate and authorize callers before dispatch and never derive memory scope from untrusted request JSON.
 
 ## License
 
-MIT - [LICENSE](../LICENSE)
+[MIT](../LICENSE).
