@@ -2,12 +2,13 @@
 
 ## Local checks
 
-The repository holds four Go modules: the core module at the root, [`mcp`](../mcp), [`examples/mcp-server`](../examples/mcp-server) and [`integration/providers`](../integration/providers). Run the gates in each:
+The repository holds five Go modules: the core module at the root, [`mcp`](../mcp), [`examples/mcp-server`](../examples/mcp-server), [`examples/inventory-demo`](../examples/inventory-demo), and [`integration/providers`](../integration/providers). Run the gates in each:
 
 ```sh
 go vet ./... && go test -race ./...
 (cd mcp && go vet ./... && go test -race ./...)
 (cd examples/mcp-server && go vet ./... && go test -race ./...)
+(cd examples/inventory-demo && CGO_ENABLED=1 go vet ./... && CGO_ENABLED=1 go test -race ./...)
 (cd integration/providers && go vet ./... && go test -run '^$' ./...)
 ```
 
@@ -19,9 +20,9 @@ go test -run '^$' -bench . -benchmem ./...
 
 ## Continuous integration
 
-[CI](../.github/workflows/ci.yml) runs formatting, build, vet, and race tests for the core, `mcp` and `examples/mcp-server` modules on the exact minimum Go 1.25.5 and current stable Go. Automatic toolchain upgrades are disabled so the minimum-version check cannot silently use a newer compiler. A separate stable-Go job builds, vets, and compiles the official-provider SDK tests without executing paid requests.
+[CI](../.github/workflows/ci.yml) runs formatting, build, vet, and race tests for the core, `mcp`, `examples/mcp-server`, and `examples/inventory-demo` modules on the exact minimum Go 1.25.5 and current stable Go. Automatic toolchain upgrades are disabled so the minimum-version check cannot silently use a newer compiler. A separate stable-Go job builds, vets, and compiles the official-provider SDK tests without executing paid requests. Inventory tests use temporary SQLite databases with CGO; they never start Claude Code or call a model.
 
-The SDK tests live in the separate [integration/providers](../integration/providers) module, with pinned OpenAI and Anthropic SDK dependencies and committed checksums. The core module remains dependency-free; only `mcp` and the MCP example depend on the official MCP Go SDK. Compile them locally without credentials:
+The SDK tests live in the separate [integration/providers](../integration/providers) module, with pinned OpenAI and Anthropic SDK dependencies and committed checksums. The core module remains dependency-free; MCP-related modules use the official MCP Go SDK, and the inventory example additionally uses SQLite through a CGO driver. Compile the provider tests locally without credentials:
 
 ```sh
 (cd integration/providers && go test -run '^$' ./...)

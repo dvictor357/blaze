@@ -73,6 +73,7 @@ Streamable HTTP with bearer auth, per-user memory scopes and the full set of cli
 |---|---|
 | [examples/agent-loop](examples/agent-loop/main.go) | Full model round trip with OpenAI and Anthropic using the built-in tools. Reads `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, skips a provider without one. |
 | [examples/mcp-server](examples/mcp-server) | The tools as an MCP server for Claude Desktop, Claude Code and Cursor (stdio or HTTP). |
+| [examples/inventory-demo](examples/inventory-demo) | A real SQLite business tool shared by HTTP and MCP, with a dashboard and actual Claude Code CLI calls. Requires CGO; model access is optional. [Run the demo](docs/mcp.md#inventory-business-tool-demo). |
 | [examples/main.go](examples/main.go) | An HTTP tool server: `GET /v1/tools`, `POST /v1/invoke`, bearer auth, SSE streaming. |
 
 ```sh

@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="demo-token" content="{{.Token}}">
+  <meta name="description" content="A local inventory demo: one Blaze executor, HTTP and Claude Code over MCP, backed by SQLite.">
+  <meta name="theme-color" content="#141516">
+  <title>Blaze — Inventory execution lab</title>
+  <style>
+    :root { color-scheme: dark; --bg: #141516; --surface: #1c1d1e; --inset: #171819; --border: #333435; --muted: #a4a5a5; --text: #f1f0eb; --orange: #ff985c; --green: #9dd9b4; --red: #ffaaa0; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, textarea { font: inherit; }
+    button { min-height: 44px; cursor: pointer; border-radius: 7px; border: 1px solid #484440; color: var(--text); background: #2b2927; padding: 10px 15px; font-weight: 600; transition: background .15s, border-color .15s; }
+    button:hover:not(:disabled) { background: #3a332e; border-color: #9c7458; }
+    button:disabled { cursor: wait; opacity: .55; }
+    button:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; }
+    button.primary { background: var(--orange); color: #25170d; border-color: var(--orange); }
+    button.primary:hover:not(:disabled) { background: #ffae80; border-color: #ffae80; }
+    .shell { max-width: 1376px; margin: 0 auto; padding: 0 40px 16px; }
+    .topbar { height: 73px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); gap: 16px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-size: 25px; font-weight: 750; letter-spacing: -1px; }
+    .brand svg { width: 23px; height: 28px; color: var(--orange); }
+    .brand-divider { height: 20px; width: 1px; background: #494949; margin: 0 7px; }
+    .brand-label { font: 11px var(--mono); color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .badge { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; font: 10px/1.5 var(--mono); color: #c8c9c6; white-space: nowrap; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); display: inline-block; flex-shrink: 0; }
+    .dot.live { background: var(--green); box-shadow: 0 0 9px #9dd9b433; }
+    .intro { display: flex; justify-content: space-between; align-items: center; padding: 24px 0 22px; gap: 20px; }
+    .eyebrow { color: var(--orange); text-transform: uppercase; letter-spacing: 1.6px; font: 10px/1.5 var(--mono); }
+    h1 { font-size: clamp(25px, 2.5vw, 34px); line-height: 1.2; letter-spacing: -1.1px; margin: 5px 0 5px; font-weight: 650; }
+    .intro p { color: var(--muted); margin: 0; font-size: 12px; }
+    .pipeline { display: flex; gap: 10px; align-items: center; color: #8f9191; font: 10px var(--mono); }
+    .pipeline b { color: #ddd8d1; border: 1px solid #46403a; background: #25211e; padding: 8px 12px; border-radius: 5px; font-weight: 500; }
+    .main-grid, .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .main-grid > *, .bottom-grid > * { min-width: 0; }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .panel-head { min-height: 56px; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
+    h2 { font-size: 13px; margin: 0; font-weight: 650; }
+    .section-number { font: 10px var(--mono); color: #8f9291; margin-right: 9px; }
+    .subtle { color: var(--muted); font-size: 11px; }
+    .mono { font-family: var(--mono); }
+    .inventory { padding: 19px 20px 16px; }
+    .product { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 49px; }
+    .product h3 { font-size: 17px; margin: 0 0 2px; letter-spacing: -.3px; }
+    .product-code { font: 10px var(--mono); color: var(--muted); }
+    .keyboard { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; background: #242526; border: 1px solid #4a4b4b; border-bottom: 4px solid #353637; border-radius: 6px; width: 143px; padding: 6px; transform: rotate(-7deg); flex-shrink: 0; }
+    .keyboard i { background: #464849; height: 9px; border-radius: 1px; box-shadow: 0 1px #626463 inset; }
+    .keyboard i:nth-child(9n+1) { background: #b4784f; box-shadow: 0 1px #d09a73 inset; }
+    .keyboard i:last-child { grid-column: span 5; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; margin: 17px 0 14px; gap: 10px; }
+    .metric { border-left: 1px solid #3c3d3d; padding-left: 16px; }
+    .metric:first-child { border-left: 0; padding-left: 0; }
+    .metric-label { display: block; color: var(--muted); font-size: 11px; }
+    .metric-value { display: block; font: 38px/1.15 var(--mono); letter-spacing: -2px; margin-top: 5px; font-weight: 500; }
+    .metric-value.available { color: var(--orange); }
+    .meter { height: 5px; border-radius: 4px; background: #3c3b39; display: flex; overflow: hidden; }
+    .meter span { width: 0; background: var(--orange); transition: width .4s ease; }
+    .reserve-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 17px; }
+    .reserve-line .subtle { margin-top: 3px; }
+    .reserve-line button { font-size: 12px; }
+    .ledger { border-top: 1px solid var(--border); }
+    .ledger-head { display: flex; justify-content: space-between; align-items: center; padding: 11px 20px 8px; }
+    .ledger-head h3 { font-size: 11px; font-weight: 500; margin: 0; color: #cecfcc; }
+    .ledger-rows { height: 94px; overflow-y: auto; padding: 0 20px 10px; scrollbar-width: thin; }
+    .ledger-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 8px 0; border-top: 1px solid #2d2f2f; }
+    .order-id { font: 11px var(--mono); overflow-wrap: anywhere; }
+    .reservation-id { color: var(--muted); font: 9px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .source { font: 9px var(--mono); border: 1px solid #4b4b45; border-radius: 4px; padding: 3px 6px; color: #d4d3ca; }
+    .source.mcp { color: var(--orange); border-color: #655044; background: #33271f; }
+    .quantity { font: 12px var(--mono); white-space: nowrap; }
+    .empty { font-size: 11px; color: #999c9b; padding: 17px 0; }
+    .console { display: flex; flex-direction: column; }
+    .console-heading { display: flex; align-items: center; gap: 9px; }
+    .console-mark { width: 23px; height: 23px; border-radius: 5px; color: var(--orange); background: #382a20; display: grid; place-items: center; font: 13px var(--mono); }
+    .console-body { padding: 15px 20px 16px; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    .field-label { display: block; font: 10px var(--mono); color: #c2c3bf; margin-bottom: 7px; }
+    textarea { display: block; resize: vertical; width: 100%; min-height: 79px; max-height: 150px; border: 1px solid #41403d; border-radius: 6px; padding: 10px 12px; background: #141516; color: #e4e1d8; font: 11px/1.6 var(--mono); }
+    .console-action { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 10px 0 13px; }
+    .console-action button { font-size: 12px; min-width: 160px; }
+    .status { font: 10px/1.5 var(--mono); color: var(--muted); display: flex; gap: 7px; align-items: center; }
+    .status.pending { color: var(--orange); }
+    .status.pending .dot { background: var(--orange); animation: pulse 1.3s infinite; }
+    .status.success { color: var(--green); }
+    .status.error { color: var(--red); }
+    .response-frame { background: var(--inset); border: 1px solid #303232; border-radius: 6px; flex: 1; min-height: 137px; }
+    .response-label { display: flex; justify-content: space-between; border-bottom: 1px solid #2d2e2e; padding: 7px 10px; font: 9px var(--mono); color: #a3a6a3; }
+    #claude-reply { height: 111px; overflow-y: auto; padding: 10px 12px; scrollbar-width: thin; font: 11px/1.65 var(--mono); overflow-wrap: anywhere; white-space: pre-wrap; margin: 0; }
+    #claude-reply .placeholder { color: #a0a29e; }
+    .tool-call { color: var(--orange); margin: 0 0 10px; padding-bottom: 9px; border-bottom: 1px solid #32302c; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .reply-text { margin: 0; white-space: pre-wrap; font: inherit; }
+    .bottom-grid { margin-top: 18px; }
+    .bottom-grid .panel-head { min-height: 46px; padding-top: 11px; padding-bottom: 11px; }
+    .guard-body { padding: 12px 20px; }
+    .guard-actions { display: flex; gap: 10px; }
+    .guard-actions button { text-align: left; display: flex; flex: 1; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 11px; min-width: 0; font-size: 11px; }
+    .guard-actions button span { display: block; color: #c6bbb1; font: 9px/1.5 var(--mono); margin-top: 2px; }
+    .guard-actions button b { color: var(--orange); font: 16px var(--mono); flex-shrink: 0; }
+    .result-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 11px 0 5px; font: 9px var(--mono); color: var(--muted); }
+    #request-status { text-align: right; }
+    #request-result { height: 79px; overflow: auto; background: var(--inset); border: 1px solid #303232; border-radius: 5px; margin: 0; padding: 8px 10px; color: #bfc5bd; font: 10px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; }
+    #activity { height: 184px; padding: 0 20px; overflow-y: auto; scrollbar-width: thin; }
+    .event { display: grid; grid-template-columns: 5px minmax(0, 1fr) auto; gap: 10px; padding: 11px 0; border-bottom: 1px solid #303232; }
+    .event > .dot { margin-top: 5px; width: 5px; height: 5px; background: var(--green); }
+    .event.rejected > .dot { background: var(--red); }
+    .event-title { font-size: 11px; color: #dfdfd9; overflow-wrap: anywhere; }
+    .event-detail { font: 9px/1.6 var(--mono); color: #a5a8a2; margin-top: 3px; overflow-wrap: anywhere; }
+    .event-side { text-align: right; }
+    .event-time { font: 9px var(--mono); color: #8c908c; margin-top: 6px; }
+    footer { display: flex; justify-content: space-between; gap: 15px; padding-top: 17px; font: 9px/1.6 var(--mono); color: #8f9390; }
+    footer code { color: #b8b8af; }
+    #state-error { color: var(--red); margin: 0 0 12px; font-size: 12px; }
+    .skeleton { opacity: .35; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 50% { opacity: .45; } }
+    @media (min-width: 1100px) {
+      .topbar { height: 64px; }
+      .intro { padding: 18px 0 16px; }
+      h1 { font-size: 32px; }
+      .main-grid > .panel { min-height: 407px; }
+      .inventory { padding: 16px 20px 14px; }
+      .metrics { margin: 12px 0 11px; }
+      .ledger-rows { height: 84px; }
+      .guard-body { padding: 10px 20px; }
+      .guard-actions button { padding: 6px 11px; }
+      .result-head { margin-top: 8px; }
+      #request-result { height: 67px; }
+      #activity { height: 160px; }
+    }
+    @media (max-width: 1099px) { .shell { padding-left: 24px; padding-right: 24px; } .pipeline { display: none; } .brand-label { font-size: 9px; } .console-body { padding-left: 15px; padding-right: 15px; } .reserve-line { align-items: start; flex-direction: column; } .reserve-line button { width: 100%; } .inventory { padding-top: 15px; } .keyboard { width: 110px; gap: 2px; padding: 5px; } .keyboard i { height: 7px; } .product h3 { font-size: 15px; } .guard-actions { flex-direction: column; gap: 7px; } #activity { height: 242px; } .guard-actions button { min-height: 48px; } .ledger-rows { height: 100px; } .console-action { align-items: start; flex-direction: column; } .console-action button { width: 100%; } #claude-reply { height: 166px; } }
+    @media (max-width: 699px) { .shell { padding: 0 16px 20px; } .topbar { height: auto; min-height: 72px; flex-wrap: wrap; gap: 10px; padding: 14px 0; } .brand { font-size: 23px; } .brand-label { font-size: 9px; } .badges { gap: 6px; } .badge { font-size: 9px; } .intro { padding: 24px 0 20px; } .intro p { line-height: 1.7; max-width: 310px; } .main-grid, .bottom-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; } .panel-head { padding-left: 16px; padding-right: 16px; } .inventory { padding: 17px 16px; } .keyboard { width: 121px; } .product h3 { font-size: 16px; } .reserve-line { flex-direction: row; align-items: center; } .reserve-line button { width: auto; } .reserve-line .mono { font-size: 11px; } .ledger-head, .ledger-rows { padding-left: 16px; padding-right: 16px; } .console-body { padding: 15px 16px; } .console-action { flex-direction: row; align-items: center; } .console-action button { width: auto; min-width: 143px; } #claude-reply { height: 185px; } .bottom-grid { margin-top: 14px; } .guard-body { padding-left: 16px; padding-right: 16px; } .guard-actions { flex-direction: row; } .guard-actions button { padding: 8px; gap: 5px; font-size: 10px; } .guard-actions button b { font-size: 14px; } .guard-actions button span { font-size: 8px; } #activity { height: 204px; padding: 0 16px; } footer { flex-direction: column; gap: 5px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><svg viewBox="0 0 24 30" fill="none" aria-hidden="true"><path d="M14 1 2 17h9l-1 12 12-17h-9L14 1Z" fill="currentColor"/></svg>blaze<span class="brand-divider"></span><span class="brand-label">Execution lab / 001</span></div>
+      <div class="badges"><span class="badge"><span class="dot"></span>Local demo data</span><span class="badge">SQLite</span><span class="badge">Same executor · HTTP + MCP</span></div>
+    </header>
+    <section class="intro" aria-labelledby="page-title">
+      <div><div class="eyebrow">Real tools. Real state.</div><h1 id="page-title">One tool. Two ways in.</h1><p>Reserve inventory over HTTP or let Claude Code call it over MCP.</p></div>
+      <div class="pipeline" aria-label="HTTP and MCP feed one Blaze executor and SQLite"><span>HTTP / MCP</span><span>→</span><b>Blaze executor</b><span>→</span><span>SQLite</span></div>
+    </section>
+    <p id="state-error" role="alert" hidden></p>
+    <main>
+      <div class="main-grid">
+        <section class="panel" aria-labelledby="inventory-heading">
+          <div class="panel-head"><h2 id="inventory-heading"><span class="section-number">01</span>Inventory</h2><span class="status" id="state-status"><span class="dot"></span>Connecting</span></div>
+          <div class="inventory">
+            <div class="product"><div><h3 id="product-name" class="skeleton">Loading product…</h3><div id="product-sku" class="product-code">Reading SQLite inventory</div></div><div class="keyboard" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+            <div class="metrics" aria-label="Current inventory">
+              <div class="metric"><span class="metric-label">Available</span><span id="available" class="metric-value available skeleton">—</span></div>
+              <div class="metric"><span class="metric-label">Reserved</span><span id="reserved" class="metric-value skeleton">—</span></div>
+              <div class="metric"><span class="metric-label">Total units</span><span id="total" class="metric-value skeleton">—</span></div>
+            </div>
+            <div class="meter" aria-hidden="true"><span id="available-meter"></span></div>
+            <div class="reserve-line"><div><div class="mono" style="font-size:12px">ORD-1042 <span class="subtle">/ 3 units</span></div><div class="subtle">Direct tool invocation</div></div><button id="reserve-http" class="primary" type="button">Reserve via HTTP <span aria-hidden="true">↗</span></button></div>
+          </div>
+          <div class="ledger"><div class="ledger-head"><h3>Reservation ledger</h3><span class="subtle mono" id="reservation-count">Loading…</span></div><div class="ledger-rows" id="reservations" tabindex="0" aria-label="Reservation ledger"><div class="empty skeleton">Fetching reservations…</div></div></div>
+        </section>
+        <section class="panel console" aria-labelledby="claude-heading">
+          <div class="panel-head"><div class="console-heading"><span class="console-mark" aria-hidden="true">&gt;_</span><h2 id="claude-heading">Claude Code</h2></div><span class="badge">CLI → MCP</span></div>
+          <div class="console-body">
+            <form id="claude-form">
+              <label class="field-label" for="claude-prompt">PROMPT → REAL CLAUDE CODE CLI</label>
+              <textarea id="claude-prompt" name="prompt" required maxlength="2000" spellcheck="false">Reserve 2 units of KB-001 for order ORD-1043 using reserve_inventory. Call the tool exactly once, then report the reservation ID and remaining stock in one sentence.</textarea>
+              <div class="console-action"><span class="status" id="claude-status" role="status"><span class="dot"></span>Ready for a prompt</span><button type="submit" id="ask-claude" class="primary">Ask Claude Code <span aria-hidden="true">↗</span></button></div>
+            </form>
+            <div class="response-frame"><div class="response-label"><span>TOOL CALLS + REPLY</span><span id="claude-duration">Awaiting invocation</span></div><div id="claude-reply" tabindex="0" aria-label="Claude tool calls and reply" aria-live="polite"><span class="placeholder">Send a prompt to run Claude Code against the local MCP server. Its actual tool calls and response will appear here.</span></div></div>
+          </div>
+        </section>
+      </div>
+      <div class="bottom-grid">
+        <section class="panel" aria-labelledby="safeguards-heading">
+          <div class="panel-head"><h2 id="safeguards-heading"><span class="section-number">02</span>Try the safeguards</h2><span class="subtle mono">Real requests</span></div>
+          <div class="guard-body"><div class="guard-actions">
+            <button type="button" id="invalid-input"><div>Blaze schema check<span>ORD-BAD · quantity -2</span></div><b aria-hidden="true">−2 ↗</b></button>
+            <button type="button" id="insufficient-stock"><div>Business rule<span>ORD-OVER · quantity 10</span></div><b aria-hidden="true">10 ↗</b></button>
+          </div><div class="result-head"><span>TOOL RESULT / ERROR</span><span id="request-status" role="status">No request sent</span></div><pre id="request-result" tabindex="0" aria-label="HTTP tool result or error">Run an HTTP action to inspect the actual tool result.</pre></div>
+        </section>
+        <section class="panel" aria-labelledby="activity-heading">
+          <div class="panel-head"><h2 id="activity-heading"><span class="section-number">03</span>Execution activity</h2><span class="subtle mono" id="event-count">Loading…</span></div>
+          <div id="activity" tabindex="0" aria-label="Execution activity"><div class="empty skeleton">Fetching execution events…</div></div>
+        </section>
+      </div>
+    </main>
+    <footer><span><code>reserve_inventory · quantity: { type: "integer", minimum: 1, maximum: 100 }</code></span><span>Local only · SQLite transactions · Unique order IDs prevent duplicate reservations</span></footer>
+  </div>
+  <script>
+    'use strict';
+    const token = document.querySelector('meta[name="demo-token"]').content;
+    const byId = id => document.getElementById(id);
+    const httpButtons = ['reserve-http', 'invalid-input', 'insufficient-stock'].map(byId);
+    let reservationsSnapshot = '';
+    let eventsSnapshot = '';
+    let lastLoaded = false;
+    let statePending = false;
+
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function setStatus(id, text, kind = '') {
+      const target = byId(id);
+      target.className = 'status' + (kind ? ' ' + kind : '');
+      target.replaceChildren(element('span', 'dot' + (kind === 'success' ? ' live' : '')), document.createTextNode(text));
+    }
+    async function request(path, body) {
+      const response = await fetch(path, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: 'no-store'
+      });
+      const text = await response.text();
+      let data;
+      try { data = JSON.parse(text); } catch (_) { throw new Error('HTTP ' + response.status + ': server returned a non-JSON response.'); }
+      return { response, data };
+    }
+    function sourceBadge(source) { return element('span', 'source' + (source === 'MCP' ? ' mcp' : ''), source); }
+    function renderReservations(rows) {
+      const signature = JSON.stringify(rows);
+      if (signature === reservationsSnapshot) return;
+      reservationsSnapshot = signature;
+      byId('reservation-count').textContent = rows.length + (rows.length === 1 ? ' reservation' : ' reservations');
+      const fragment = document.createDocumentFragment();
+      if (!rows.length) fragment.append(element('div', 'empty', 'No reservations yet. Make the first tool call above.'));
+      rows.forEach(row => {
+        const item = element('div', 'ledger-row');
+        const details = element('div');
+        details.append(element('div', 'order-id', row.order_id), element('div', 'reservation-id', row.id));
+        item.append(details, sourceBadge(row.source), element('span', 'quantity', row.quantity + ' units'));
+        fragment.append(item);
+      });
+      byId('reservations').replaceChildren(fragment);
+    }
+    function renderEvents(rows) {
+      const signature = JSON.stringify(rows);
+      if (signature === eventsSnapshot) return;
+      eventsSnapshot = signature;
+      byId('event-count').textContent = rows.length + (rows.length === 1 ? ' event' : ' events');
+      const fragment = document.createDocumentFragment();
+      if (!rows.length) fragment.append(element('div', 'empty', 'No execution events yet. HTTP and MCP activity appears here.'));
+      rows.forEach(row => {
+        const item = element('div', 'event' + (row.status === 'rejected' ? ' rejected' : ''));
+        const details = element('div');
+        details.append(element('div', 'event-title', row.message));
+        const metadata = [row.order_id, row.quantity == null ? '' : row.quantity + ' units', row.status, row.code].filter(Boolean).join(' · ');
+        details.append(element('div', 'event-detail', metadata));
+        const side = element('div', 'event-side');
+        const date = new Date(row.created_at);
+        side.append(sourceBadge(row.source), element('div', 'event-time', Number.isNaN(date.getTime()) ? row.created_at : date.toLocaleTimeString('en-GB', { hour12: false })));
+        item.append(element('span', 'dot'), details, side);
+        fragment.append(item);
+      });
+      byId('activity').replaceChildren(fragment);
+    }
+    async function refreshState() {
+      if (statePending) return;
+      statePending = true;
+      try {
+        const { response, data } = await request('/api/state');
+        if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
+        if (!data.product || !Array.isArray(data.reservations) || !Array.isArray(data.events)) throw new Error('Unexpected inventory response.');
+        const product = data.product;
+        byId('product-name').textContent = product.name;
+        byId('product-name').classList.remove('skeleton');
+        byId('product-sku').textContent = product.sku + ' / SQLite inventory';
+        ['available', 'reserved', 'total'].forEach(key => {
+          byId(key).textContent = product[key];
+          byId(key).classList.remove('skeleton');
+        });
+        byId('available-meter').style.width = (product.total > 0 ? product.available / product.total * 100 : 0) + '%';
+        renderReservations(data.reservations);
+        renderEvents(data.events);
+        lastLoaded = true;
+        byId('state-error').hidden = true;
+        setStatus('state-status', 'Live state', 'success');
+      } catch (error) {
+        byId('state-error').textContent = 'Inventory could not refresh: ' + error.message + (lastLoaded ? ' Showing last known state.' : ' Waiting for server data.');
+        byId('state-error').hidden = false;
+        setStatus('state-status', lastLoaded ? 'Last known state' : 'Connection unavailable', 'error');
+      } finally { statePending = false; }
+    }
+    async function invoke(quantity, orderId) {
+      httpButtons.forEach(button => { button.disabled = true; });
+      const payload = { calls: [{ id: 'http-' + Date.now(), name: 'reserve_inventory', input: { sku: 'KB-001', quantity, order_id: orderId } }], stream: false };
+      byId('request-status').textContent = 'Sending ' + orderId + '…';
+      byId('request-result').textContent = 'POST /api/invoke\n' + JSON.stringify(payload, null, 2);
+      try {
+        const { response, data } = await request('/api/invoke', payload);
+        const failed = !response.ok || (Array.isArray(data.results) && data.results.some(result => result.ok === false));
+        const rejectedResult = Array.isArray(data.results) ? data.results.find(result => result.ok === false) : undefined;
+        const errorCode = rejectedResult && rejectedResult.error ? rejectedResult.error.code : (data.error && data.error.code);
+        byId('request-status').textContent = 'HTTP ' + response.status + (errorCode ? ' · ' + errorCode : (failed ? ' · Rejected' : ' · Response received'));
+        byId('request-status').style.color = failed ? 'var(--red)' : 'var(--green)';
+        const result = Array.isArray(data.results) ? data.results[0] : undefined;
+        byId('request-result').textContent = JSON.stringify(result ? (result.ok ? result.output : result.error) : data, null, 2);
+        byId('request-result').scrollTop = 0;
+      } catch (error) {
+        byId('request-status').textContent = 'Request failed';
+        byId('request-status').style.color = 'var(--red)';
+        byId('request-result').textContent = error.message + '\nThe outcome is unknown. Check live inventory before sending another reservation.';
+      } finally {
+        httpButtons.forEach(button => { button.disabled = false; });
+        void refreshState();
+      }
+    }
+    byId('reserve-http').addEventListener('click', () => invoke(3, 'ORD-1042'));
+    byId('invalid-input').addEventListener('click', () => invoke(-2, 'ORD-BAD'));
+    byId('insufficient-stock').addEventListener('click', () => invoke(10, 'ORD-OVER'));
+    byId('claude-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const prompt = byId('claude-prompt').value.trim();
+      if (!prompt) { byId('claude-prompt').focus(); return; }
+      byId('ask-claude').disabled = true;
+      byId('claude-prompt').readOnly = true;
+      byId('claude-form').setAttribute('aria-busy', 'true');
+      setStatus('claude-status', 'Claude Code is running…', 'pending');
+      byId('claude-duration').textContent = 'Waiting for CLI';
+      byId('claude-reply').textContent = 'Invoking the actual Claude Code CLI. Inventory continues to refresh while the MCP request runs.';
+      const started = Date.now();
+      const clock = setInterval(() => { byId('claude-duration').textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed'; }, 1000);
+      try {
+        const { response, data } = await request('/api/claude', { prompt });
+        if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Claude request failed (HTTP ' + response.status + ').');
+        if (typeof data.reply !== 'string' || !Array.isArray(data.tool_calls)) throw new Error('Unexpected Claude response.');
+        const fragment = document.createDocumentFragment();
+        data.tool_calls.forEach(call => { fragment.append(element('pre', 'tool-call', 'MCP → ' + call.name + '\n' + JSON.stringify(call.input))); });
+        fragment.append(element('div', 'reply-text', data.reply || '(Claude returned an empty reply.)'));
+        byId('claude-reply').replaceChildren(fragment);
+        byId('claude-reply').scrollTop = 0;
+        setStatus('claude-status', 'Complete · ' + data.tool_calls.length + (data.tool_calls.length === 1 ? ' tool call' : ' tool calls'), 'success');
+        byId('claude-duration').textContent = typeof data.duration_ms === 'number' ? (data.duration_ms / 1000).toFixed(1) + 's' : 'Completed';
+      } catch (error) {
+        setStatus('claude-status', 'Claude Code failed', 'error');
+        byId('claude-reply').textContent = error.message + '\n\nCheck live inventory before retrying: a tool call may have completed before the error.';
+        byId('claude-duration').textContent = 'Failed after ' + Math.floor((Date.now() - started) / 1000) + 's';
+      } finally {
+        clearInterval(clock);
+        byId('ask-claude').disabled = false;
+        byId('claude-prompt').readOnly = false;
+        byId('claude-form').removeAttribute('aria-busy');
+        void refreshState();
+      }
+    });
+    async function poll() { await refreshState(); setTimeout(poll, 800); }
+    void poll();
+  </script>
+</body>
+</html>

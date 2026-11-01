@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/). Before 1.0, minor versions may contain breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- Local inventory demo: a transactional SQLite `reserve_inventory` tool shared by HTTP and MCP, a browser dashboard, and a real Claude Code CLI integration. Includes schema/business-rule rejection examples, application-level order idempotency, and race-tested stock invariants. The separate example module requires CGO; the core remains dependency-free.
+
 ## [0.1.0] - 2026-11-01
 
 First tagged release. Two modules are tagged together: `github.com/dvictor357/blaze` (`v0.1.0`) and `github.com/dvictor357/blaze/mcp` (`mcp/v0.1.0`).

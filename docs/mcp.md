@@ -45,3 +45,26 @@ The MCP layer adds no new trust: it calls the same executor, so the guarantees i
 - **stdio.** Standard output carries the protocol. Log to stderr. The executor logs recovered panics with the standard `log` package, which writes to stderr by default.
 
 For transport settings the defaults do not cover (sessions, SSE responses), build your own handler from `NewServer` with `mcp.NewStreamableHTTPHandler`, and keep the body limit and the protections above.
+
+## Inventory business-tool demo
+
+[`examples/inventory-demo`](../examples/inventory-demo) exposes a transactional `reserve_inventory` Go tool through HTTP and MCP using one executor, with a browser dashboard showing real SQLite state.
+
+Requires Go 1.25.5+, CGO, and a C compiler (Xcode Command Line Tools on macOS). From the repository root:
+
+```sh
+cd examples/inventory-demo
+CGO_ENABLED=1 go run . -addr 127.0.0.1:18084 -db inventory.db
+```
+
+Open <http://127.0.0.1:18084>. The server generates and prints a bearer token, or uses `BLAZE_DEMO_TOKEN`. The dashboard receives that token in its HTML and authenticates `/api/*` requests; MCP clients use the same bearer header at `/mcp`. This is a **loopback-only, single-user demo**, not production authentication. Do not expose it through a public reverse proxy.
+
+A new database starts with eight keyboards (`KB-001`). Reserve three through HTTP, then use **Ask Claude Code** to reserve two through MCP: three remain available and five are reserved. The Claude action runs the installed, authenticated `claude` CLI with only the inventory MCP tool enabled, no built-in tools, no hooks, and no session persistence. It uses the `sonnet` alias and may consume model usage. The displayed tool calls and reply are actual CLI output; failures never fall back to simulated responses. HTTP inventory features need no model access.
+
+The safeguard buttons send real requests: quantity −2 fails Blaze's schema validation before the handler runs; quantity ten fails the handler's stock rule. Both leave stock unchanged. A business rejection uses Blaze's `handler_error` code; its message and activity entry identify `insufficient_stock`.
+
+SQL transactions commit the stock decrement, reservation, and success event together. **Order idempotency is business-handler logic, not a Blaze executor guarantee:** identical order/SKU/quantity replays return the existing reservation without decrementing stock; conflicting order reuse fails. Existing databases retain their state on restart. Use a new database path for a clean recording; there is no reset endpoint.
+
+`GET /api/state` returns product, reservations, and newest-first activity; `POST /api/invoke` uses the standard Blaze invocation contract. HTTP request/schema rejections and business outcomes are audited. MCP protocol/schema failures that never reach the handler are not included in this demo's activity feed. Claude requests are serialized and time-bounded; if a request fails after execution, check inventory before retrying.
+
+Run `CGO_ENABLED=1 go test -race ./...` inside this module for concurrent no-oversell, duplicate-order, rejection, and persistence checks. These tests never invoke Claude or make model calls.

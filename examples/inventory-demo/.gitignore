@@ -1,0 +1,4 @@
+/inventory-demo
+*.db
+*.db-shm
+*.db-wal

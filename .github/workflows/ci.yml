@@ -25,8 +25,8 @@ jobs:
       fail-fast: false
       matrix:
         go: ['1.25.5', 'stable']
-        # The core module, the MCP module, and the MCP example module.
-        module: ['.', 'mcp', 'examples/mcp-server']
+        # Core, MCP, and the independently built example modules.
+        module: ['.', 'mcp', 'examples/mcp-server', 'examples/inventory-demo']
     env:
       CGO_ENABLED: '1'
     defaults:
