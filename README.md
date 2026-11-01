@@ -6,6 +6,10 @@
 
 **Write a Go function once, expose it safely to OpenAI, Anthropic and MCP.**
 
+[![Blaze inventory demo: one Go tool reserves stock over HTTP and through Claude Code over MCP](docs/media/inventory-demo.gif)](docs/media/inventory-demo.mp4)
+
+<sub>One `reserve_inventory` tool, two ways in: HTTP and Claude Code over MCP, with real SQLite state and rejected bad calls. [Watch the full MP4](docs/media/inventory-demo.mp4) · [run it yourself](docs/mcp.md#inventory-business-tool-demo).</sub>
+
 ## Why
 
 Every LLM app with tools ends up writing the same glue: a JSON Schema per provider, a loop that turns the model's tool calls into function calls, and the defensive code around them. That defensive part is the one that tends to get skipped. Model output is untrusted input: arguments can be malformed, a call can hang, a handler can panic, a `fetch` tool can be pointed at `169.254.169.254`.
